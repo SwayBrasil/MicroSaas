@@ -6,7 +6,6 @@ import {
   getMessages,
   postMessage,
   deleteThread,
-  // 🆕 takeover
   setTakeover,
   postHumanReply,
   type Thread,
@@ -24,7 +23,7 @@ function formatTime(dt: string | number | Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-/** SSE helper */
+/** SSE helper (mantido caso volte ao SSE depois) */
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 function sseUrlForThread(threadId: number | string) {
   const token = localStorage.getItem("token") || "";
@@ -308,13 +307,17 @@ export default function Chat() {
   const [sending, setSending] = useState(false);
   const [input, setInput] = useState("");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // estados de tempo real (mantidos caso você use SSE depois)
   const [isTyping, setIsTyping] = useState(false);
+  const [assistantBuffer, setAssistantBuffer] = useState<string>("");
 
   // takeover (estado local; persistido no backend ao alternar)
   const [takeoverActive, setTakeoverActive] = useState<boolean>(false);
 
   const listRef = useRef<HTMLDivElement | null>(null);
-  const esRef = useRef<EventSource | null>(null);
+  const esRef = useRef<EventSource | null>(null); // não usado no polling, mantido pra compatibilidade
+  const pollRef = useRef<number | null>(null);    // ✅ MOVIDO PARA DENTRO DO COMPONENTE
 
   /** Carrega threads ao abrir */
   useEffect(() => {
@@ -347,10 +350,10 @@ export default function Chat() {
         setErrorMsg(null);
         const msgs = await getMessages(Number(activeId));
         setMessages(msgs as any);
-        // Reset takeover local (o estado verdadeiro está no backend; se quiser, traga no ThreadRead)
         setTakeoverActive(false);
+        setAssistantBuffer("");
+        setIsTyping(false);
 
-        // rola pro final
         requestAnimationFrame(() => {
           listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
         });
@@ -362,54 +365,48 @@ export default function Chat() {
     })();
   }, [activeId]);
 
-  /** Assina SSE da thread ativa */
+  /** Polling de mensagens a cada 2s (fallback de “ao vivo”) */
   useEffect(() => {
     if (!activeId) return;
 
-    // evita duplicar streams
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
+    // limpa intervalo anterior
+    if (pollRef.current) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
     }
 
-    try {
-      const url = sseUrlForThread(activeId);
-      const es = new EventSource(url);
-      esRef.current = es;
-
-      es.onopen = () => {
-        // console.log("SSE conectado", activeId);
-      };
-
-      es.onmessage = (ev) => {
-        try {
-          const payload = JSON.parse(ev.data);
-          if (payload?.type === "message.created" && payload.message) {
-            const msg = payload.message as UIMessage;
-            setMessages((prev) => {
-              if (prev.some((m) => m.id === msg.id)) return prev;
-              return [...prev, msg];
-            });
+    // busca e mescla novas mensagens sem duplicar
+    const fetchAndMerge = async () => {
+      try {
+        const serverMsgs = await getMessages(Number(activeId));
+        setMessages((prev) => {
+          const map = new Map(prev.map((m) => [String(m.id), m]));
+          for (const m of serverMsgs as UIMessage[]) {
+            map.set(String(m.id), m);
           }
-        } catch {
-          // ignore
-        }
-      };
+          return Array.from(map.values()).sort((a, b) => {
+            const ai = String(a.id), bi = String(b.id);
+            if (ai.startsWith("temp-") && !bi.startsWith("temp-")) return -1;
+            if (!ai.startsWith("temp-") && bi.startsWith("temp-")) return 1;
+            return Number(a.id) - Number(b.id);
+          });
+        });
+      } catch {
+        // silencioso
+      }
+    };
 
-      es.addEventListener("keepalive", () => {});
-      es.addEventListener("ping", () => {});
+    // primeira sincronização imediata
+    fetchAndMerge();
 
-      es.onerror = () => {
-        // O browser tenta reconectar automaticamente
-      };
-    } catch (err) {
-      // console.error("SSE init error", err);
-    }
+    // intervalo de 2s
+    pollRef.current = window.setInterval(fetchAndMerge, 2000) as unknown as number;
 
+    // cleanup
     return () => {
-      if (esRef.current) {
-        esRef.current.close();
-        esRef.current = null;
+      if (pollRef.current) {
+        window.clearInterval(pollRef.current);
+        pollRef.current = null;
       }
     };
   }, [activeId]);
@@ -419,7 +416,7 @@ export default function Chat() {
     requestAnimationFrame(() => {
       listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
     });
-  }, [messages.length]);
+  }, [messages.length, assistantBuffer]);
 
   async function handleNewThread() {
     try {
@@ -429,6 +426,8 @@ export default function Chat() {
       setMessages([]);
       setInput("");
       setTakeoverActive(false);
+      setAssistantBuffer("");
+      setIsTyping(false);
     } catch (e: any) {
       setErrorMsg(e?.message || "Não foi possível criar a conversa.");
     }
@@ -443,6 +442,8 @@ export default function Chat() {
         setActiveId(rest[0] ? String(rest[0].id) : undefined);
         setMessages([]);
         setTakeoverActive(false);
+        setAssistantBuffer("");
+        setIsTyping(false);
       }
     } catch (e: any) {
       setErrorMsg(e?.message || "Não foi possível excluir a conversa.");
@@ -478,7 +479,7 @@ export default function Chat() {
     setMessages((prev) => [...prev, optimistic]);
     setInput("");
     setSending(true);
-    setIsTyping(!takeoverActive);
+    if (!takeoverActive) setIsTyping(true);
     setErrorMsg(null);
 
     try {
@@ -487,19 +488,16 @@ export default function Chat() {
       } else {
         await postMessage(Number(activeId), content);
       }
-      // Com SSE, as mensagens chegam sozinhas; manter o GET aqui é opcional.
-      // Para consistência, podemos buscar o estado final:
-      // const newMsgs = await getMessages(Number(activeId));
-      // setMessages(newMsgs as any);
+      // Polling vai sincronizar a versão final
     } catch (e: any) {
       setErrorMsg(
         e?.response?.data?.detail || e?.message || "Falha ao enviar. Tente novamente."
       );
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       setInput(content);
+      setIsTyping(false);
     } finally {
       setSending(false);
-      setIsTyping(false);
     }
   }
 
@@ -594,7 +592,19 @@ export default function Chat() {
                 <Bubble key={m.id} m={m} />
               ))}
 
-              {!takeoverActive && isTyping && (
+              {/* mensagem parcial (reservado para SSE futuro) */}
+              {assistantBuffer && (
+                <div className="bubble assistant">
+                  <div className="meta">
+                    <span className="role">Assistente</span>
+                    <span className="time">{formatTime(Date.now())}</span>
+                  </div>
+                  <div className="content">{assistantBuffer}</div>
+                </div>
+              )}
+
+              {/* indicador "digitando..." (útil quando a IA ainda vai responder) */}
+              {!assistantBuffer && !takeoverActive && isTyping && (
                 <div className="bubble assistant">
                   <div className="meta">
                     <span className="role">Assistente</span>

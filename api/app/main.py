@@ -1,14 +1,27 @@
+# app/main.py
+
 import os
+import json
+import jwt
 import asyncio
-from typing import Dict, Set, List, Optional  # se for usar em SSE / tipagem
+from typing import Dict, Set
 
-from fastapi import FastAPI, Depends, HTTPException, Request, Query
+from fastapi import (
+    FastAPI,
+    Depends,
+    HTTPException,
+    Request,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
-from sqlalchemy import func, case, select  # ✅ select é da SQLAlchemy
+from sqlalchemy import func, case, select
 from sqlalchemy.orm import Session
 
-from pydantic import BaseModel  # ✅ precisa estar presente
+from pydantic import BaseModel
 
 from .db import get_db, engine, SessionLocal
 from .models import Base, User, Thread, Message
@@ -26,6 +39,9 @@ from .services.llm_service import run_llm
 from .providers import twilio as twilio_provider
 from .providers import meta as meta_provider
 
+# Realtime via WebSocket
+from .realtime import hub
+
 # -----------------------------
 # App & CORS
 # -----------------------------
@@ -34,7 +50,7 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title=os.getenv("APP_NAME", "MVP Chat"))
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -89,7 +105,7 @@ def me(user: User = Depends(get_current_user)):
 # -----------------------------
 # SSE infra (tempo real)
 # -----------------------------
-SUBS: dict[int, set[asyncio.Queue]] = {}
+SUBS: Dict[int, Set[asyncio.Queue]] = {}
 SUBS_LOCK = asyncio.Lock()
 
 async def _subscribe(thread_id: int) -> asyncio.Queue:
@@ -106,6 +122,11 @@ async def _unsubscribe(thread_id: int, q: asyncio.Queue):
                 SUBS.pop(thread_id, None)
 
 async def _broadcast(thread_id: int, payload: dict):
+    """
+    Envia o payload para todos assinantes SSE e também para os clientes WebSocket
+    do mesmo thread_id (via hub).
+    """
+    # SSE
     async with SUBS_LOCK:
         queues = list(SUBS.get(thread_id, set()))
     for q in queues:
@@ -113,6 +134,14 @@ async def _broadcast(thread_id: int, payload: dict):
             await q.put(payload)
         except Exception:
             pass
+
+    # WS
+    try:
+        await hub.broadcast(str(thread_id), payload)
+    except Exception:
+        # Não bloquear fluxo em caso de erro de WS
+        pass
+
 
 # tenta usar decode_token se existir; senão, fallback simples a partir de SECRET_KEY
 def _decode_token_fallback(token: str) -> dict:
@@ -139,13 +168,25 @@ def _user_from_query_token(db: Session, token: str) -> User:
         raise HTTPException(401, "invalid user")
     return u
 
+from typing import Optional
+from fastapi import Header
+
 @app.get("/threads/{thread_id}/stream")
 async def stream_thread(
     thread_id: int,
     request: Request,
-    token: str = Query(..., description="JWT de acesso (use o mesmo de /auth/login)"),
+    token: Optional[str] = Query(None, description="JWT de acesso (ou use Authorization: Bearer)"),
+    authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
+    # 1) Aceitar Authorization: Bearer <token> como fallback
+    if not token and authorization:
+        if authorization.lower().startswith("bearer "):
+            token = authorization.split(" ", 1)[1].strip()
+
+    if not token:
+        raise HTTPException(401, "missing token")
+
     user = _user_from_query_token(db, token)
 
     t = db.get(Thread, thread_id)
@@ -170,8 +211,13 @@ async def stream_thread(
         finally:
             await _unsubscribe(thread_id, q)
 
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
-
+    # 2) Cabeçalhos para evitar buffering
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",  # nginx
+    }
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=headers)
 
 # -----------------------------
 # Threads
@@ -227,7 +273,16 @@ def get_messages(
         .order_by(Message.id.asc())
         .all()
     )
-    return [MessageRead(id=m.id, role=m.role, content=m.content) for m in msgs]
+
+    return [
+    MessageRead(
+        id=m.id,
+        role=m.role,
+        content=m.content,
+        created_at=m.created_at,   # ✅
+    )
+    for m in msgs
+    ]
 
 @app.post("/threads/{thread_id}/messages", response_model=MessageRead)
 async def send_message(
@@ -244,15 +299,25 @@ async def send_message(
     m_user = Message(thread_id=thread_id, role="user", content=body.content)
     db.add(m_user); db.commit(); db.refresh(m_user)
 
-    # 🔴 broadcast da mensagem do usuário
+    # 🔴 broadcast da mensagem do usuário (SSE + WS)
     await _broadcast(thread_id, {
         "type": "message.created",
-        "message": {"id": m_user.id, "role": m_user.role, "content": m_user.content}
+        "message": {
+            "id": m_assist.id,
+            "role": m_assist.role,
+            "content": m_assist.content,
+            "created_at": m_assist.created_at.isoformat(),  # ✅
+        }
     })
 
     # takeover ativo → não chama LLM
     if getattr(t, "human_takeover", False):
-        return MessageRead(id=m_user.id, role=m_user.role, content=m_user.content)
+        return MessageRead(
+            id=m_assist.id,
+            role=m_assist.role,
+            content=m_assist.content,
+            created_at=m_assist.created_at,  # ✅
+        )
 
     # histórico para a LLM
     hist = [
@@ -262,11 +327,18 @@ async def send_message(
         .order_by(Message.id.asc())
         .all()
     ]
+
+    # Sinaliza “digitando” (opcional, útil no front)
+    await _broadcast(thread_id, {"type": "assistant.typing.start"})
+
     reply = await run_llm(
         body.content,
         thread_history=hist,
         takeover=getattr(t, "human_takeover", False),
     )
+
+    # Parar “digitando”
+    await _broadcast(thread_id, {"type": "assistant.typing.stop"})
 
     if reply:
         m_assist = Message(thread_id=thread_id, role="assistant", content=reply)
@@ -275,12 +347,27 @@ async def send_message(
         # 🔵 broadcast da resposta da IA
         await _broadcast(thread_id, {
             "type": "message.created",
-            "message": {"id": m_assist.id, "role": m_assist.role, "content": m_assist.content}
+            "message": {
+                "id": m_assist.id,
+                "role": m_assist.role,
+                "content": m_assist.content,
+                "created_at": m_assist.created_at.isoformat(),  # ✅
+            }
         })
 
-        return MessageRead(id=m_assist.id, role=m_assist.role, content=m_assist.content)
+        return MessageRead(
+            id=m_assist.id,
+            role=m_assist.role,
+            content=m_assist.content,
+            created_at=m_assist.created_at,  # ✅
+        )
 
-    return MessageRead(id=m_user.id, role=m_user.role, content=m_user.content)
+    return MessageRead(
+        id=m_assist.id,
+        role=m_assist.role,
+        content=m_assist.content,
+        created_at=m_assist.created_at,  # ✅
+    )
 
 
 # -----------------------------
@@ -294,7 +381,10 @@ def meta_verify(
 ):
     expected = os.getenv("META_VERIFY_TOKEN")
     if hub_verify_token == expected:
-        return int(hub_challenge or 0)
+        try:
+            return int(hub_challenge or 0)
+        except Exception:
+            return hub_challenge or "OK"
     raise HTTPException(403, "Invalid verify token")
 
 @app.post("/webhooks/meta")
@@ -351,7 +441,10 @@ async def meta_webhook(req: Request, db: Session = Depends(get_db)):
         .order_by(Message.id.asc())
         .all()
     ]
+
+    await _broadcast(t.id, {"type": "assistant.typing.start"})
     reply = await run_llm(text, thread_history=hist, takeover=False)
+    await _broadcast(t.id, {"type": "assistant.typing.stop"})
 
     m_assist = Message(thread_id=t.id, role="assistant", content=reply)
     db.add(m_assist); db.commit(); db.refresh(m_assist)
@@ -420,7 +513,10 @@ async def twilio_webhook(req: Request, db: Session = Depends(get_db)):
         .order_by(Message.id.asc())
         .all()
     ]
+
+    await _broadcast(t.id, {"type": "assistant.typing.start"})
     reply = await run_llm(body, thread_history=hist, takeover=False)
+    await _broadcast(t.id, {"type": "assistant.typing.stop"})
 
     # salva resposta da IA
     m_assist = Message(thread_id=t.id, role="assistant", content=reply)
@@ -480,3 +576,18 @@ def stats(user: User = Depends(get_current_user), db: Session = Depends(get_db))
         "total_messages": total_msgs,
         "last_activity": last_activity,
     }
+
+
+# -----------------------------
+# WebSocket por thread (tempo real)
+# -----------------------------
+@app.websocket("/ws/threads/{thread_id}")
+async def ws_thread(websocket: WebSocket, thread_id: str):
+    # Se tiver auth por token, valide aqui antes de accept()
+    await hub.connect(thread_id, websocket)
+    try:
+        while True:
+            # Se quiser receber “client typing” etc, leia mensagens do ws:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await hub.disconnect(thread_id, websocket)

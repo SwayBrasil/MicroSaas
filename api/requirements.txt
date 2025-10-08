@@ -1,12 +1,27 @@
+# Core FastAPI stack
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
+
+# Banco de dados
 SQLAlchemy==2.0.36
 psycopg2-binary==2.9.9
-python-multipart==0.0.9
+
+# Autenticação / Segurança
 passlib[bcrypt]==1.7.4
 PyJWT==2.9.0
+email-validator==2.2.0
+
+# Manipulação de formulários / multipart (Twilio Webhook)
+python-multipart==0.0.9
+
+# Pydantic e validações
 pydantic==2.9.2
+
+# HTTP e APIs externas
 httpx==0.27.2
 openai==1.52.0
-email-validator==2.2.0
 twilio>=9.0.0,<10
+
+# Evitar duplicidade (já incluído acima)
+# fastapi
+# uvicorn[standard]

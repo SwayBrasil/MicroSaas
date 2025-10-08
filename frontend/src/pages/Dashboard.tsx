@@ -5,39 +5,57 @@ import {
   listThreads,
   createThread,
   deleteThread,
+  getStats,
   type Thread,
-} from "../lib/api";
+  type StatsResponse,
+} from "../api";
 
 export default function Dashboard() {
   const [threads, setThreads] = useState<Thread[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [loadingThreads, setLoadingThreads] = useState(true);
+  const [loadingStats, setLoadingStats] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
 
-  async function refresh() {
+  async function refreshThreads() {
     try {
       setError(null);
-      setLoading(true);
+      setLoadingThreads(true);
       const data = await listThreads();
       setThreads(Array.isArray(data) ? data : []);
     } catch (e: any) {
       setError(e?.message || "Falha ao carregar conversas");
     } finally {
-      setLoading(false);
+      setLoadingThreads(false);
+    }
+  }
+
+  async function refreshStats() {
+    try {
+      setLoadingStats(true);
+      const s = await getStats();
+      setStats(s);
+    } catch {
+      setStats(null);
+    } finally {
+      setLoadingStats(false);
     }
   }
 
   useEffect(() => {
-    refresh();
+    refreshThreads();
+    refreshStats();
   }, []);
 
   async function handleCreate() {
     try {
       setCreating(true);
       const t = await createThread("Nova conversa");
-      // navega direto pro chat da nova thread
-      navigate(`/chat?thread=${t?.id ?? t?.thread_id ?? ""}`);
+      // navegar para o chat; o Chat já seleciona a primeira thread.
+      // Se quiser passar o id explicitamente, mantemos o query param:
+      navigate(`/chat?thread=${t?.id ?? ""}`);
     } catch (e: any) {
       setError(e?.message || "Não foi possível criar a conversa");
     } finally {
@@ -48,8 +66,9 @@ export default function Dashboard() {
   async function handleDelete(threadId: number | string) {
     if (!confirm("Excluir esta conversa? Essa ação não pode ser desfeita.")) return;
     try {
-      await deleteThread(threadId);
-      await refresh();
+      await deleteThread(Number(threadId));
+      await refreshThreads();
+      await refreshStats();
     } catch (e: any) {
       setError(e?.message || "Não foi possível excluir");
     }
@@ -57,68 +76,61 @@ export default function Dashboard() {
 
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <h1 style={{ fontSize: 22, fontWeight: 800, color: "#0f172a", margin: 0 }}>
-        Suas conversas
+      <h1 className="profile-title" style={{ fontSize: 22, margin: 0 }}>
+        Dashboard
       </h1>
 
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "300px 1fr",
+          gridTemplateColumns: "340px 1fr",
           gap: 16,
           alignItems: "start",
         }}
       >
-        {/* COLUNA ESQUERDA — lista de threads */}
-        <aside
-          style={{
-            background: "#fff",
-            border: "1px solid #e5e7eb",
-            borderRadius: 12,
-            padding: 12,
-            display: "grid",
-            gap: 10,
-          }}
-        >
+        {/* COLUNA ESQUERDA — conversas */}
+        <aside className="profile-card" style={{ display: "grid", gap: 12 }}>
           <div
             style={{
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
-              marginBottom: 4,
+              gap: 8,
             }}
           >
-            <div style={{ fontWeight: 700, color: "#0f172a" }}>Conversas</div>
-            <button
-              onClick={handleCreate}
-              disabled={creating}
-              style={{
-                height: 32,
-                padding: "0 10px",
-                border: "1px solid #e5e7eb",
-                borderRadius: 8,
-                background: "#f9fafb",
-                cursor: "pointer",
-                fontWeight: 600,
-              }}
-            >
+            <div className="profile-title" style={{ margin: 0, fontSize: 16 }}>
+              Conversas
+            </div>
+            <button className="btn" onClick={handleCreate} disabled={creating}>
               {creating ? "Criando…" : "+ Nova"}
             </button>
           </div>
 
-          {loading ? (
-            <div style={{ color: "#475569", fontSize: 14 }}>Carregando…</div>
+          {loadingThreads ? (
+            <div className="small" style={{ color: "var(--muted)" }}>Carregando…</div>
           ) : error ? (
-            <div style={{ color: "#b91c1c", fontSize: 14 }}>{error}</div>
+            <div
+              role="alert"
+              style={{
+                border: "1px solid #7f1d1d",
+                background: "#1b0f10",
+                color: "#fecaca",
+                padding: "10px 12px",
+                borderRadius: 10,
+                fontSize: 14,
+              }}
+            >
+              {error}
+            </div>
           ) : threads.length === 0 ? (
-            <div style={{ color: "#64748b", fontSize: 14 }}>
+            <div className="small" style={{ color: "var(--muted)" }}>
               Você ainda não tem conversas.
             </div>
           ) : (
             <div
               style={{
                 display: "grid",
-                gap: 6,
+                gap: 8,
                 maxHeight: 520,
                 overflowY: "auto",
               }}
@@ -127,113 +139,132 @@ export default function Dashboard() {
                 <button
                   key={t.id}
                   onClick={() => navigate(`/chat?thread=${t.id}`)}
+                  className="item"
                   style={{
                     textAlign: "left",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
                     padding: 10,
-                    border: "1px solid #e5e7eb",
-                    borderRadius: 8,
-                    background: "#ffffff",
+                    borderRadius: 10,
+                    border: "1px solid var(--border)",
+                    background: "var(--bg)",
                     cursor: "pointer",
                   }}
                 >
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      gap: 8,
-                    }}
-                  >
-                    <div style={{ overflow: "hidden" }}>
-                      <div
-                        style={{
-                          fontWeight: 700,
-                          color: "#0f172a",
-                          whiteSpace: "nowrap",
-                          textOverflow: "ellipsis",
-                          overflow: "hidden",
-                          maxWidth: 200,
-                        }}
-                        title={t.title || `Thread #${t.id}`}
-                      >
-                        {t.title || `Thread #${t.id}`}
-                      </div>
-                      <div style={{ color: "#64748b", fontSize: 12 }}>
-                        {t.updated_at
-                          ? new Date(t.updated_at).toLocaleString()
-                          : t.created_at
-                          ? new Date(t.created_at).toLocaleString()
-                          : "—"}
-                      </div>
-                    </div>
-
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDelete(t.id!);
-                      }}
-                      title="Excluir"
+                  <div style={{ overflow: "hidden" }}>
+                    <div
                       style={{
-                        height: 28,
-                        padding: "0 8px",
-                        border: "1px solid #fecaca",
-                        borderRadius: 8,
-                        background: "#fff1f2",
-                        color: "#b91c1c",
-                        cursor: "pointer",
-                        fontSize: 12,
-                        fontWeight: 600,
+                        fontWeight: 700,
+                        color: "var(--text)",
+                        whiteSpace: "nowrap",
+                        textOverflow: "ellipsis",
+                        overflow: "hidden",
+                        maxWidth: 220,
                       }}
+                      title={t.title || `Thread #${t.id}`}
                     >
-                      Excluir
-                    </button>
+                      {t.title || `Thread #${t.id}`}
+                    </div>
+                    <div className="small" style={{ color: "var(--muted)" }}>
+                      ID #{t.id}
+                    </div>
                   </div>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDelete(t.id!);
+                    }}
+                    title="Excluir"
+                    className="btn soft"
+                    style={{ padding: "4px 10px" }}
+                  >
+                    Excluir
+                  </button>
                 </button>
               ))}
             </div>
           )}
         </aside>
 
-        {/* COLUNA DIREITA — estado vazio / instruções */}
-        <div
-          style={{
-            background: "#fff",
-            border: "1px solid #e5e7eb",
-            borderRadius: 12,
-            padding: 24,
-            minHeight: 300,
-            display: "grid",
-            placeItems: "center",
-            color: "#334155",
-          }}
-        >
-          <div style={{ textAlign: "center", maxWidth: 520 }}>
-            <h2 style={{ marginTop: 0, color: "#0f172a" }}>
-              Selecione uma conversa
-            </h2>
-            <p style={{ marginBottom: 16 }}>
-              Clique em uma conversa à esquerda para abrir no chat,
-              ou crie uma <strong>Nova</strong> para começar do zero.
-            </p>
-            <button
-              onClick={handleCreate}
-              disabled={creating}
-              style={{
-                height: 40,
-                padding: "0 16px",
-                border: "1px solid #e5e7eb",
-                borderRadius: 10,
-                background:
-                  "linear-gradient(135deg, rgba(59,130,246,0.12), rgba(99,102,241,0.12))",
-                cursor: "pointer",
-                fontWeight: 700,
-              }}
+        {/* COLUNA DIREITA — stats + dica */}
+        <div style={{ display: "grid", gap: 16 }}>
+          {/* Stats */}
+          <div className="profile-card">
+            <div
+              className="profile-title"
+              style={{ marginBottom: 12, display: "flex", justifyContent: "space-between" }}
             >
-              {creating ? "Criando…" : "➕ Nova conversa"}
-            </button>
+              <span>Seus números</span>
+              <button
+                className="btn soft"
+                onClick={() => {
+                  refreshStats();
+                  refreshThreads();
+                }}
+                style={{ padding: "6px 10px" }}
+              >
+                Atualizar
+              </button>
+            </div>
+
+            {loadingStats ? (
+              <div className="small" style={{ color: "var(--muted)" }}>Carregando…</div>
+            ) : (
+              <div className="stats-grid">
+                <StatCard title="Conversas" value={stats?.threads ?? 0} />
+                <StatCard title="Msgs (você)" value={stats?.user_messages ?? 0} />
+                <StatCard title="Msgs (assistente)" value={stats?.assistant_messages ?? 0} />
+                <StatCard title="Total de mensagens" value={stats?.total_messages ?? 0} />
+              </div>
+            )}
+
+            <div className="small" style={{ color: "var(--muted)", marginTop: 8 }}>
+              Última atividade:{" "}
+              {stats?.last_activity
+                ? new Date(stats.last_activity as any).toLocaleString()
+                : "—"}
+            </div>
+          </div>
+
+          {/* Card de orientação */}
+          <div className="profile-card" style={{ display: "grid", gap: 8 }}>
+            <div className="profile-title" style={{ fontSize: 16, margin: 0 }}>
+              Como começar
+            </div>
+            <p className="small" style={{ color: "var(--muted)", margin: 0 }}>
+              Selecione uma conversa à esquerda para abrir no chat, ou crie uma
+              <strong> nova</strong> para começar do zero. Você também pode ir
+              em <strong>Minha conta</strong> para ver token e métricas.
+            </p>
+            <div>
+              <button className="btn" onClick={handleCreate} disabled={creating}>
+                {creating ? "Criando…" : "➕ Nova conversa"}
+              </button>
+              <button
+                className="btn soft"
+                onClick={() => navigate("/profile")}
+                style={{ marginLeft: 8 }}
+              >
+                Minha conta
+              </button>
+            </div>
           </div>
         </div>
       </div>
     </section>
+  );
+}
+
+function StatCard({ title, value }: { title: string; value: number }) {
+  return (
+    <div className="stat-cardx" style={{ textAlign: "center" }}>
+      <div className="stat-kpi">{value}</div>
+      <div className="stat-label" style={{ marginTop: 6 }}>
+        {title}
+      </div>
+    </div>
   );
 }

@@ -1,8 +1,17 @@
 // frontend/src/api.ts
 import axios from "axios";
 
-const baseURL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-const api = axios.create({ baseURL });
+export const API_BASE =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+
+const api = axios.create({
+  baseURL: API_BASE,
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  },
+  timeout: 20000,
+});
 
 // --- Injeta o Bearer token salvo no localStorage (se houver) ---
 api.interceptors.request.use((config) => {
@@ -14,8 +23,27 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// ----- Tipos úteis -----
-export type Thread = { id: number; title: string; human_takeover?: boolean };
+// (Opcional) trata 401 para evitar loop silencioso
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (err?.response?.status === 401) {
+      // token inválido/expirado → deixe a tela atual lidar (login, etc.)
+      // localStorage.removeItem("token");
+    }
+    return Promise.reject(err);
+  }
+);
+
+// ----- Tipos -----
+export type Thread = {
+  id: number;
+  title: string;
+  human_takeover?: boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
 export type Message = {
   id: number | string;
   role: "user" | "assistant";
@@ -24,9 +52,9 @@ export type Message = {
   is_human?: boolean;
 };
 
-
 export type LoginResponse = { token: string };
 export type MeResponse = { id: number; email: string };
+
 export type StatsResponse = {
   threads: number;
   user_messages: number;
@@ -35,7 +63,7 @@ export type StatsResponse = {
   last_activity: string | null;
 };
 
-// Tipos específicos do Profile
+// Tipos específicos do Profile (front)
 export type ProfileDTO = {
   id: string | number;
   email: string;
@@ -52,16 +80,15 @@ export type UsageDTO = {
   assistant_sent: number;
 };
 
-export type Activity = {
-  id: string | number;
-  type: string;
-  title: string;
-  at: string | number | Date;
-};
-
 // ----- Auth -----
-export async function login(email: string, password: string): Promise<LoginResponse> {
-  const { data } = await api.post<LoginResponse>("/auth/login", { email, password });
+export async function login(
+  email: string,
+  password: string
+): Promise<LoginResponse> {
+  const { data } = await api.post<LoginResponse>("/auth/login", {
+    email,
+    password,
+  });
   localStorage.setItem("token", data.token);
   return data;
 }
@@ -71,24 +98,30 @@ export function logout() {
 }
 
 // ----- Threads -----
-export async function createThread(title: string = "Nova conversa"): Promise<Thread> {
+export async function createThread(
+  title: string = "Nova conversa"
+): Promise<Thread> {
   const { data } = await api.post<Thread>("/threads", { title });
   return data;
 }
-
 
 export async function listThreads(): Promise<Thread[]> {
   const { data } = await api.get<Thread[]>("/threads");
   return data;
 }
 
-export async function deleteThread(threadId: number): Promise<void> {
+export async function deleteThread(threadId: number | string): Promise<void> {
   await api.delete(`/threads/${threadId}`);
 }
 
 // ----- Messages -----
-export async function postMessage(threadId: number, content: string): Promise<Message> {
-  const { data } = await api.post<Message>(`/threads/${threadId}/messages`, { content });
+export async function postMessage(
+  threadId: number,
+  content: string
+): Promise<Message> {
+  const { data } = await api.post<Message>(`/threads/${threadId}/messages`, {
+    content,
+  });
   return data;
 }
 
@@ -110,15 +143,15 @@ export async function getMe(): Promise<MeResponse> {
 }
 
 // ======================================================================
-// 🔽 Adições para a nova tela de Profile
+// 🔽 Adições para a nova tela de Profile (com fallbacks seguros)
 // ======================================================================
 
-// 🔹 Perfil completo
+// 🔹 Perfil “enriquecido” (a API entrega /me simples; completamos se faltar algo)
 export async function getProfile(): Promise<ProfileDTO> {
   try {
     const { data } = await api.get<ProfileDTO>("/me");
     return {
-      id: data.id,
+      id: (data as any).id,
       email: (data as any).email ?? "dev@local.com",
       name: (data as any).name ?? "Usuário",
       plan: (data as any).plan ?? "Trial",
@@ -126,7 +159,6 @@ export async function getProfile(): Promise<ProfileDTO> {
       last_activity_at: (data as any).last_activity_at ?? null,
     };
   } catch {
-    // fallback seguro
     return {
       id: "-",
       email: "dev@local.com",
@@ -138,27 +170,25 @@ export async function getProfile(): Promise<ProfileDTO> {
   }
 }
 
-// 🔹 Uso agregado (para os cards)
+// 🔹 Uso agregado — mapeado a partir de /stats (backend existente)
 export async function getUsage(): Promise<UsageDTO> {
   try {
-    const { data } = await api.get<UsageDTO>("/stats/usage");
-    return data;
+    const s = await getStats();
+    return {
+      threads_total: s.threads ?? 0,
+      messages_total: s.total_messages ?? 0,
+      user_sent: s.user_messages ?? 0,
+      assistant_sent: s.assistant_messages ?? 0,
+    };
   } catch {
-    return { threads_total: 0, messages_total: 0, user_sent: 0, assistant_sent: 0 };
+    return {
+      threads_total: 0,
+      messages_total: 0,
+      user_sent: 0,
+      assistant_sent: 0,
+    };
   }
 }
-
-// 🔹 Atividades recentes
-export async function getActivities({ limit = 10 } = {}): Promise<Activity[]> {
-  try {
-    const { data } = await api.get<Activity[]>(`/activities?limit=${limit}`);
-    return data;
-  } catch {
-    return [];
-  }
-}
-
-export default api;
 
 // --- Takeover (novo) ---
 export async function setTakeover(
@@ -182,3 +212,13 @@ export async function postHumanReply(
   );
   return data;
 }
+
+// --- Helper opcional: URL do SSE (se quiser usar fora do Chat.tsx) ---
+export function sseUrlForThread(threadId: number | string) {
+  const token = localStorage.getItem("token") || "";
+  return `${API_BASE}/threads/${threadId}/stream?token=${encodeURIComponent(
+    token
+  )}`;
+}
+
+export default api;
