@@ -6,10 +6,14 @@ import {
   getMessages,
   postMessage,
   deleteThread,
+  // 🆕 takeover
+  setTakeover,
+  postHumanReply,
   type Thread,
   type Message,
 } from "../api";
 import { useAuth } from "../auth";
+import { useNavigate } from "react-router-dom";
 
 /** Utils */
 function clsx(...xs: Array<string | false | undefined>) {
@@ -20,16 +24,18 @@ function formatTime(dt: string | number | Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-/** Header */
-// ...imports existentes
-import { useNavigate } from "react-router-dom";
+/** SSE helper */
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+function sseUrlForThread(threadId: number | string) {
+  const token = localStorage.getItem("token") || "";
+  return `${API_BASE}/threads/${threadId}/stream?token=${encodeURIComponent(token)}`;
+}
 
+/** Header */
 function Header({ onNew }: { onNew: () => void }) {
   const { logout } = useAuth();
   const navigate = useNavigate();
-
-  // padronize aqui se trocar a rota
-  const PROFILE_PATH = "/profile"; // ou "/account"
+  const PROFILE_PATH = "/profile";
 
   return (
     <header
@@ -47,7 +53,11 @@ function Header({ onNew }: { onNew: () => void }) {
       }}
       aria-label="Barra superior"
     >
-      <div className="logo" style={{ cursor: "pointer" }} onClick={() => navigate("/")}>
+      <div
+        className="logo"
+        style={{ cursor: "pointer", display: "flex", gap: 8, alignItems: "center" }}
+        onClick={() => navigate("/")}
+      >
         <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden>
           <defs>
             <linearGradient id="g2" x1="0" x2="1" y1="0" y2="1">
@@ -62,7 +72,7 @@ function Header({ onNew }: { onNew: () => void }) {
       </div>
 
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        {/* 👤 Botão de perfil */}
+        <button className="btn" onClick={onNew}>+ Nova</button>
         <button
           className="btn soft"
           onClick={() => navigate(PROFILE_PATH)}
@@ -71,7 +81,6 @@ function Header({ onNew }: { onNew: () => void }) {
         >
           👤 Minha conta
         </button>
-
         <button
           className="btn soft"
           onClick={logout}
@@ -85,7 +94,6 @@ function Header({ onNew }: { onNew: () => void }) {
     </header>
   );
 }
-
 
 /** Sidebar de threads */
 function Sidebar({
@@ -157,10 +165,10 @@ function Sidebar({
           {filtered.map((t) => (
             <li key={t.id}>
               <button
-                className={clsx("item", activeId === t.id && "active")}
-                onClick={() => onSelect(t.id)}
+                className={clsx("item", activeId === String(t.id) && "active")}
+                onClick={() => onSelect(String(t.id))}
                 title={t.title || "Sem título"}
-                aria-current={activeId === t.id ? "page" : undefined}
+                aria-current={activeId === String(t.id) ? "page" : undefined}
                 style={{
                   width: "100%",
                   textAlign: "left",
@@ -188,7 +196,7 @@ function Sidebar({
                   onClick={(e) => {
                     e.stopPropagation();
                     if (confirm("Excluir esta conversa? Essa ação não pode ser desfeita.")) {
-                      onDelete(t.id);
+                      onDelete(String(t.id));
                     }
                   }}
                   className="chip danger"
@@ -205,15 +213,18 @@ function Sidebar({
 }
 
 /** Bolha de mensagem */
-function Bubble({ m }: { m: Message }) {
+type UIMessage = Message & { is_human?: boolean; created_at?: string };
+
+function Bubble({ m }: { m: UIMessage }) {
   const isUser = m.role === "user";
+  const assistantLabel = (m as any).is_human ? "Assistente (Humano)" : "Assistente";
   return (
     <div
       className={clsx("bubble", isUser ? "user" : "assistant")}
       aria-label={isUser ? "Mensagem do usuário" : "Resposta do assistente"}
     >
       <div className="meta">
-        <span className="role">{isUser ? "Você" : "Assistente"}</span>
+        <span className="role">{isUser ? "Você" : assistantLabel}</span>
         <span className="time">{formatTime(m.created_at || Date.now())}</span>
       </div>
       <div className="content">{m.content}</div>
@@ -238,15 +249,16 @@ function Composer({
   setValue,
   onSend,
   disabled,
+  takeoverActive,
 }: {
   value: string;
   setValue: (v: string) => void;
   onSend: () => void;
   disabled: boolean;
+  takeoverActive: boolean;
 }) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
 
-  // auto resize
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -262,18 +274,12 @@ function Composer({
   }
 
   return (
-    <div
-      style={{
-        padding: 12,
-        borderTop: "1px solid var(--border)",
-        background: "var(--bg)",
-      }}
-    >
+    <div style={{ padding: 12, borderTop: "1px solid var(--border)", background: "var(--bg)" }}>
       <div className="composer">
         <textarea
           ref={ref}
           className="input"
-          placeholder="Escreva sua mensagem..."
+          placeholder={takeoverActive ? "Você está respondendo como HUMANO..." : "Escreva sua mensagem..."}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -281,7 +287,7 @@ function Composer({
           aria-label="Caixa de mensagem"
         />
         <button className="btn" onClick={onSend} disabled={disabled || !value.trim()}>
-          Enviar
+          {takeoverActive ? "Enviar (humano)" : "Enviar"}
         </button>
       </div>
       <div className="small" style={{ color: "var(--muted)", marginTop: 6 }}>
@@ -296,7 +302,7 @@ export default function Chat() {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeId, setActiveId] = useState<string | undefined>(undefined);
 
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<UIMessage[]>([]);
   const [loadingThreads, setLoadingThreads] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
@@ -304,7 +310,11 @@ export default function Chat() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isTyping, setIsTyping] = useState(false);
 
+  // takeover (estado local; persistido no backend ao alternar)
+  const [takeoverActive, setTakeoverActive] = useState<boolean>(false);
+
   const listRef = useRef<HTMLDivElement | null>(null);
+  const esRef = useRef<EventSource | null>(null);
 
   /** Carrega threads ao abrir */
   useEffect(() => {
@@ -313,8 +323,7 @@ export default function Chat() {
         setLoadingThreads(true);
         const ts = await listThreads();
         setThreads(ts);
-        // seleciona a primeira se existir
-        if (ts.length > 0) setActiveId(ts[0].id);
+        if (ts.length > 0) setActiveId(String(ts[0].id));
       } catch (e: any) {
         setErrorMsg(e?.message || "Falha ao carregar conversas.");
       } finally {
@@ -328,10 +337,19 @@ export default function Chat() {
     if (!activeId) return;
     (async () => {
       try {
+        // fecha SSE anterior (se houver)
+        if (esRef.current) {
+          esRef.current.close();
+          esRef.current = null;
+        }
+
         setLoadingMessages(true);
         setErrorMsg(null);
-        const msgs = await getMessages(activeId);
-        setMessages(msgs);
+        const msgs = await getMessages(Number(activeId));
+        setMessages(msgs as any);
+        // Reset takeover local (o estado verdadeiro está no backend; se quiser, traga no ThreadRead)
+        setTakeoverActive(false);
+
         // rola pro final
         requestAnimationFrame(() => {
           listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
@@ -342,6 +360,58 @@ export default function Chat() {
         setLoadingMessages(false);
       }
     })();
+  }, [activeId]);
+
+  /** Assina SSE da thread ativa */
+  useEffect(() => {
+    if (!activeId) return;
+
+    // evita duplicar streams
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
+    }
+
+    try {
+      const url = sseUrlForThread(activeId);
+      const es = new EventSource(url);
+      esRef.current = es;
+
+      es.onopen = () => {
+        // console.log("SSE conectado", activeId);
+      };
+
+      es.onmessage = (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          if (payload?.type === "message.created" && payload.message) {
+            const msg = payload.message as UIMessage;
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === msg.id)) return prev;
+              return [...prev, msg];
+            });
+          }
+        } catch {
+          // ignore
+        }
+      };
+
+      es.addEventListener("keepalive", () => {});
+      es.addEventListener("ping", () => {});
+
+      es.onerror = () => {
+        // O browser tenta reconectar automaticamente
+      };
+    } catch (err) {
+      // console.error("SSE init error", err);
+    }
+
+    return () => {
+      if (esRef.current) {
+        esRef.current.close();
+        esRef.current = null;
+      }
+    };
   }, [activeId]);
 
   /** Scroll automático quando chegam novas mensagens */
@@ -355,9 +425,10 @@ export default function Chat() {
     try {
       const t = await createThread();
       setThreads((prev) => [t, ...prev]);
-      setActiveId(t.id);
+      setActiveId(String(t.id));
       setMessages([]);
       setInput("");
+      setTakeoverActive(false);
     } catch (e: any) {
       setErrorMsg(e?.message || "Não foi possível criar a conversa.");
     }
@@ -365,15 +436,26 @@ export default function Chat() {
 
   async function handleDeleteThread(id: string) {
     try {
-      await deleteThread(id);
-      setThreads((prev) => prev.filter((t) => t.id !== id));
+      await deleteThread(Number(id));
+      setThreads((prev) => prev.filter((t) => String(t.id) !== id));
       if (activeId === id) {
-        const rest = threads.filter((t) => t.id !== id);
-        setActiveId(rest[0]?.id);
+        const rest = threads.filter((t) => String(t.id) !== id);
+        setActiveId(rest[0] ? String(rest[0].id) : undefined);
         setMessages([]);
+        setTakeoverActive(false);
       }
     } catch (e: any) {
       setErrorMsg(e?.message || "Não foi possível excluir a conversa.");
+    }
+  }
+
+  async function toggleTakeover(next: boolean) {
+    if (!activeId) return;
+    try {
+      await setTakeover(Number(activeId), next);
+      setTakeoverActive(next);
+    } catch (e: any) {
+      setErrorMsg(e?.message || "Falha ao alternar takeover.");
     }
   }
 
@@ -381,33 +463,38 @@ export default function Chat() {
     if (!activeId) {
       await handleNewThread();
     }
-    if (!activeId) return; // segurança
+    if (!activeId) return;
     const content = input.trim();
     if (!content) return;
 
-    // otimista: joga msg do usuário
-    const optimistic: Message = {
+    // Otimista
+    const optimistic: UIMessage = {
       id: "temp-" + Date.now(),
-      role: "user",
+      role: takeoverActive ? "assistant" : "user",
+      is_human: takeoverActive ? true : undefined,
       content,
       created_at: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, optimistic]);
     setInput("");
     setSending(true);
-    setIsTyping(true);
+    setIsTyping(!takeoverActive);
     setErrorMsg(null);
 
     try {
-      const reply = await postMessage(activeId, content);
-      // `postMessage` pode retornar 1+ msgs; assumimos ultima como resposta
-      const newMsgs = await getMessages(activeId);
-      setMessages(newMsgs);
+      if (takeoverActive) {
+        await postHumanReply(Number(activeId), content);
+      } else {
+        await postMessage(Number(activeId), content);
+      }
+      // Com SSE, as mensagens chegam sozinhas; manter o GET aqui é opcional.
+      // Para consistência, podemos buscar o estado final:
+      // const newMsgs = await getMessages(Number(activeId));
+      // setMessages(newMsgs as any);
     } catch (e: any) {
       setErrorMsg(
         e?.response?.data?.detail || e?.message || "Falha ao enviar. Tente novamente."
       );
-      // reverte a última otimista?
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
       setInput(content);
     } finally {
@@ -443,10 +530,37 @@ export default function Chat() {
           style={{
             height: "calc(100vh - 56px)",
             display: "grid",
-            gridTemplateRows: "1fr auto",
+            gridTemplateRows: "auto 1fr auto",
           }}
           aria-label="Janela do chat"
         >
+          {/* Barra de status / takeover */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              padding: "10px 16px",
+              borderBottom: "1px solid var(--border)",
+              background: "var(--panel)",
+            }}
+          >
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={takeoverActive}
+                onChange={(e) => toggleTakeover(e.target.checked)}
+              />
+              <span>👤 Assumir conversa (pausar IA)</span>
+            </label>
+
+            {takeoverActive && (
+              <span className="chip" style={{ background: "#1e3a8a", color: "white" }}>
+                Modo humano ativo — a IA está pausada
+              </span>
+            )}
+          </div>
+
           {/* Lista de mensagens */}
           <div
             ref={listRef}
@@ -480,7 +594,7 @@ export default function Chat() {
                 <Bubble key={m.id} m={m} />
               ))}
 
-              {isTyping && (
+              {!takeoverActive && isTyping && (
                 <div className="bubble assistant">
                   <div className="meta">
                     <span className="role">Assistente</span>
@@ -511,7 +625,6 @@ export default function Chat() {
                   onClick={() => {
                     setErrorMsg(null);
                     if (messages.length === 0) return;
-                    // tenta reenviar a última mensagem do usuário
                     const lastUser = [...messages].reverse().find((m) => m.role === "user");
                     if (lastUser) {
                       setInput(lastUser.content);
@@ -526,7 +639,13 @@ export default function Chat() {
           </div>
 
           {/* Composer */}
-          <Composer value={input} setValue={setInput} onSend={handleSend} disabled={sending} />
+          <Composer
+            value={input}
+            setValue={setInput}
+            onSend={handleSend}
+            disabled={sending}
+            takeoverActive={takeoverActive}
+          />
         </main>
       </div>
     </div>

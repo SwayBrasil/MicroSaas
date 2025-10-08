@@ -15,8 +15,16 @@ api.interceptors.request.use((config) => {
 });
 
 // ----- Tipos úteis -----
-export type Thread = { id: number; title: string };
-export type Message = { id: number; role: "user" | "assistant"; content: string };
+export type Thread = { id: number; title: string; human_takeover?: boolean };
+export type Message = {
+  id: number | string;
+  role: "user" | "assistant";
+  content: string;
+  created_at?: string;
+  is_human?: boolean;
+};
+
+
 export type LoginResponse = { token: string };
 export type MeResponse = { id: number; email: string };
 export type StatsResponse = {
@@ -63,10 +71,11 @@ export function logout() {
 }
 
 // ----- Threads -----
-export async function createThread(title: string): Promise<Thread> {
+export async function createThread(title: string = "Nova conversa"): Promise<Thread> {
   const { data } = await api.post<Thread>("/threads", { title });
   return data;
 }
+
 
 export async function listThreads(): Promise<Thread[]> {
   const { data } = await api.get<Thread[]>("/threads");
@@ -150,3 +159,26 @@ export async function getActivities({ limit = 10 } = {}): Promise<Activity[]> {
 }
 
 export default api;
+
+// --- Takeover (novo) ---
+export async function setTakeover(
+  threadId: number,
+  active: boolean
+): Promise<{ ok: boolean; human_takeover: boolean }> {
+  const { data } = await api.post<{ ok: boolean; human_takeover: boolean }>(
+    `/threads/${threadId}/takeover`,
+    { active }
+  );
+  return data;
+}
+
+export async function postHumanReply(
+  threadId: number,
+  content: string
+): Promise<{ ok: boolean; message_id: number }> {
+  const { data } = await api.post<{ ok: boolean; message_id: number }>(
+    `/threads/${threadId}/human-reply`,
+    { content }
+  );
+  return data;
+}

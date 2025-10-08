@@ -18,7 +18,14 @@ class MessageRead(BaseModel):
 
 class ThreadRead(BaseModel):
     id: int
-    title: Optional[str]
+    title: str
+    human_takeover: bool  # novo
 
 class ThreadCreate(BaseModel):
     title: Optional[str] = None
+
+class TakeoverToggle(BaseModel):
+    active: bool
+
+class HumanReplyBody(BaseModel):
+    content: str

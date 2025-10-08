@@ -1,8 +1,9 @@
 # api/app/services/llm_service.py
 import os
 import asyncio
+import math
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 from openai import OpenAI
 
@@ -18,6 +19,11 @@ API_KEY = os.getenv("OPENAI_API_KEY")
 #    default aponta para o caminho dentro do container
 DEFAULT_PROMPT_FILE = "/app/app/agent_instructions.txt"
 
+# Robustez
+REQUEST_TIMEOUT = float(os.getenv("OPENAI_REQUEST_TIMEOUT", "30"))  # segundos
+MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "3"))
+RETRY_BASE = float(os.getenv("OPENAI_RETRY_BASE", "0.6"))  # backoff exponencial
+MAX_HISTORY = int(os.getenv("OPENAI_MAX_HISTORY", "20"))   # msgs (user/assistant/system)
 
 def _load_agent_instructions() -> str:
     s = os.getenv("AGENT_INSTRUCTIONS", "") or ""
@@ -48,65 +54,95 @@ client = OpenAI(api_key=API_KEY)
 # -----------------------------
 # Utilidades
 # -----------------------------
-def _coerce_history(thread_history: Optional[List[Dict[str, str]]]) -> List[Dict[str, str]]:
+def _coerce_history(thread_history: Optional[List[Dict[str, str]]],
+                    max_history: int = MAX_HISTORY) -> List[Dict[str, str]]:
     """
-    Garante formato esperado e limita a ~20 mensagens mais recentes
+    Garante formato esperado e limita a N mensagens mais recentes
     para não estourar a janela de contexto.
     """
     if not thread_history:
         return []
 
-    # Normaliza campos e filtra vazios
     norm: List[Dict[str, str]] = []
     for m in thread_history:
         role = (m.get("role") or "").strip()
         content = (m.get("content") or "").strip()
         if not role or not content:
             continue
-        # Apenas "user" e "assistant" são relevantes para histórico
+        # Apenas "user", "assistant" e "system" são relevantes para histórico
         if role not in ("user", "assistant", "system"):
-            # se vier "tool"/"function" etc., ignora
             continue
         norm.append({"role": role, "content": content})
 
-    # Mantém só as últimas 20 mensagens
-    if len(norm) > 20:
-        norm = norm[-20:]
+    if max_history and len(norm) > max_history:
+        norm = norm[-max_history:]
     return norm
+
+
+async def _call_openai_with_retries(messages: List[Dict[str, str]]) -> str:
+    """
+    Chamada ao OpenAI com retries e backoff exponencial.
+    Executa a chamada síncrona em thread separada para não bloquear o loop.
+    """
+    last_err: Optional[BaseException] = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            def _sync_call() -> Any:
+                # Em SDKs recentes, o timeout pode ser passado por request
+                # Se sua versão não aceitar 'timeout', remova o argumento.
+                return client.chat.completions.create(
+                    model=MODEL,
+                    messages=messages,
+                    timeout=REQUEST_TIMEOUT,
+                )
+
+            resp = await asyncio.to_thread(_sync_call)
+            content = (resp.choices[0].message.content or "").strip()
+            return content
+        except Exception as e:
+            last_err = e
+            if attempt >= MAX_RETRIES:
+                break
+            # Backoff exponencial com jitter leve
+            delay = (RETRY_BASE ** attempt) + (attempt * 0.05)
+            await asyncio.sleep(delay)
+
+    # Fallback amigável
+    return "Desculpe, tive um problema para gerar a resposta agora. Pode tentar novamente?"
 
 
 # -----------------------------
 # LLM
 # -----------------------------
-async def run_llm(message: str, thread_history: Optional[List[Dict[str, str]]] = None) -> str:
+async def run_llm(
+    message: str,
+    thread_history: Optional[List[Dict[str, str]]] = None,
+    takeover: bool = False,
+) -> Optional[str]:
     """
     Gera uma resposta da LLM usando:
       - system prompt carregado do .env/arquivo
-      - histórico (últimas 20 mensagens)
+      - histórico (limite configurável)
       - mensagem do usuário
-    Executa a chamada síncrona da OpenAI em thread para não bloquear o loop.
+
+    Se `takeover=True`, não gera resposta (modo humano assumiu) e retorna None.
     """
+    # 🔒 Bloqueio de takeover: nunca responder se humano assumiu
+    if takeover:
+        return None
+
     # Monta a lista de mensagens no formato da API
     messages: List[Dict[str, str]] = []
     if AGENT_INSTRUCTIONS:
         messages.append({"role": "system", "content": AGENT_INSTRUCTIONS})
 
-    history = _coerce_history(thread_history)
+    history = _coerce_history(thread_history, max_history=MAX_HISTORY)
     messages.extend(history)
 
     user_msg = (message or "").strip()
     messages.append({"role": "user", "content": user_msg})
 
-    # Chamada síncrona em thread separada (não bloqueia o event loop)
-    def _call_openai():
-        return client.chat.completions.create(model=MODEL, messages=messages)
-
-    try:
-        resp = await asyncio.to_thread(_call_openai)
-        content = (resp.choices[0].message.content or "").strip()
-        return content
-    except Exception as e:
-        # Log mínimo (se tiver logger, use-o aqui)
-        # print(f"[LLM ERROR] {e}")  # evite logar conteúdo sensível em prod
-        # Fallback genérico
-        return "Desculpe, tive um problema para gerar a resposta agora. Pode tentar novamente?"
+    # Chamar OpenAI com robustez (timeout + retries)
+    content = await _call_openai_with_retries(messages)
+    return content
