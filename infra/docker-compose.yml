@@ -24,15 +24,24 @@ services:
     environment:
       DB_URL: postgresql+psycopg2://saas:saas@db:5432/saas
       CORS_ALLOW_ORIGINS: http://localhost:3000,${PUBLIC_BASE_URL}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      # Twilio (se usar):
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+      TWILIO_FROM: ${TWILIO_FROM:-whatsapp:+14155238886}
       TWILIO_WHATSAPP_FROM: ${TWILIO_WHATSAPP_FROM:-whatsapp:+14155238886}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      ENABLE_TWILIO: ${ENABLE_TWILIO:-false}
+      ENABLE_META: ${ENABLE_META:-false}
+      INBOX_OWNER_EMAIL: ${INBOX_OWNER_EMAIL:-dev@local.com}
     depends_on:
       db:
         condition: service_healthy
     ports:
       - "8000:8000"
+    # monta código para hot-reload do uvicorn
+    volumes:
+      - ../api/app:/app/app
+    command: ["sh", "-c", "./start.sh --reload"]
     healthcheck:
       test:
         - CMD-SHELL
@@ -45,6 +54,15 @@ services:
       retries: 30
       start_period: 20s
     restart: unless-stopped
+    develop:
+      watch:
+        # Sincroniza alterações de código sem rebuild
+        - action: sync
+          path: ../api/app
+          target: /app/app
+        # Se mudar requirements, força rebuild da imagem
+        - action: rebuild
+          path: ../api/requirements.txt
 
   frontend:
     build:
@@ -53,11 +71,15 @@ services:
         VITE_API_BASE_URL: http://localhost:8000
     environment:
       VITE_API_BASE_URL: http://localhost:8000
-    ports:
-      - "3000:3000"
     depends_on:
       api:
         condition: service_healthy
+    ports:
+      - "3000:3000"
+    # roda Vite em modo dev dentro do container (hot-reload)
+    command: ["sh", "-c", "npm i && npm run dev -- --host --port 3000"]
+    volumes:
+      - ../frontend:/app
     healthcheck:
       test:
         - CMD-SHELL
@@ -70,6 +92,21 @@ services:
       retries: 30
       start_period: 15s
     restart: unless-stopped
+    develop:
+      watch:
+        # Sincroniza src (rápido)
+        - action: sync
+          path: ../frontend/src
+          target: /app/src
+        # Se mudar dependências, rebuilda a imagem
+        - action: rebuild
+          path: ../frontend/package.json
+        - action: rebuild
+          path: ../frontend/package-lock.json
+        - action: rebuild
+          path: ../frontend/pnpm-lock.yaml
+        - action: rebuild
+          path: ../frontend/yarn.lock
 
 volumes:
   db_data:

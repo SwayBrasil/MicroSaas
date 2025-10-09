@@ -232,7 +232,7 @@ export default function Profile() {
 
   // Pie
   const pieData: PieDatum[] = [
-    { label: "Você", value: totalUser, color: "#4f46e5" },
+    { label: "Usuário", value: totalUser, color: "#4f46e5" },
     { label: "Assistente", value: totalAssistant, color: "#22c55e" },
   ];
 
@@ -350,7 +350,7 @@ export default function Profile() {
             <div className="small" style={{ fontWeight: 600 }}>Distribuição de mensagens</div>
             <PieChart
               data={[
-                { label: "Você", value: totalUser, color: "#4f46e5" },
+                { label: "Usuario", value: totalUser, color: "#4f46e5" },
                 { label: "Assistente", value: totalAssistant, color: "#22c55e" },
               ]}
               size={220}
@@ -384,7 +384,7 @@ export default function Profile() {
               <thead>
                 <tr>
                   <Th>Data</Th>
-                  <Th>Você</Th>
+                  <Th>Usuário</Th>
                   <Th>Assistente</Th>
                   <Th>Total</Th>
                 </tr>

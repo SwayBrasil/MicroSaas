@@ -222,7 +222,7 @@ function Bubble({ m }: { m: UIMessage }) {
       aria-label={isUser ? "Mensagem do usuário" : "Resposta do assistente"}
     >
       <div className="meta">
-        <span className="role">{isUser ? "Você" : assistantLabel}</span>
+        <span className="role">{isUser ? "Usuário" : assistantLabel}</span>
         <span className="time">{formatTime(m.created_at || Date.now())}</span>
       </div>
       <div className="content">{m.content}</div>
