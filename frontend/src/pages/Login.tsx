@@ -225,11 +225,6 @@ export default function Login() {
         >
           {loading ? "Entrando..." : "Entrar"}
         </button>
-
-        {/* Dica de credenciais de dev (opcional) */}
-        <div className="small" style={{ textAlign: "center", color: "var(--muted)", marginTop: 4 }}>
-          Dica: use <code>dev@local.com</code> / <code>123</code> no ambiente de dev.
-        </div>
       </form>
     </div>
   );

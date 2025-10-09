@@ -71,7 +71,6 @@ function Header({ onNew }: { onNew: () => void }) {
       </div>
 
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <button className="btn" onClick={onNew}>+ Nova</button>
         <button
           className="btn soft"
           onClick={() => navigate(PROFILE_PATH)}
