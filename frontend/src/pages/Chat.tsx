@@ -12,7 +12,7 @@ import {
   type Message,
 } from "../api";
 import { useAuth } from "../auth";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 
 /** Utils */
 function clsx(...xs: Array<string | false | undefined>) {
@@ -31,10 +31,31 @@ function sseUrlForThread(threadId: number | string) {
 }
 
 /** Header */
+/** Header (com navegação) */
 function Header({ onNew }: { onNew: () => void }) {
   const { logout } = useAuth();
   const navigate = useNavigate();
-  const PROFILE_PATH = "/profile";
+  const location = useLocation();
+
+  const isActive = (path: string) =>
+    location.pathname === path || location.pathname.startsWith(path);
+
+  const NavBtn = ({
+    to,
+    label,
+  }: {
+    to: string;
+    label: string;
+  }) => (
+    <button
+      className={"btn soft" + (isActive(to) ? " active" : "")}
+      onClick={() => navigate(to)}
+      style={{ padding: "6px 10px" }}
+      aria-current={isActive(to) ? "page" : undefined}
+    >
+      {label}
+    </button>
+  );
 
   return (
     <header
@@ -52,6 +73,7 @@ function Header({ onNew }: { onNew: () => void }) {
       }}
       aria-label="Barra superior"
     >
+      {/* Logo */}
       <div
         className="logo"
         style={{ cursor: "pointer", display: "flex", gap: 8, alignItems: "center" }}
@@ -70,11 +92,28 @@ function Header({ onNew }: { onNew: () => void }) {
         <span>Sway</span>
       </div>
 
+      {/* Navegação centro */}
+      <nav style={{ display: "flex", gap: 8, alignItems: "center" }} aria-label="Navegação principal">
+        <NavBtn to="/chat" label="Chat" />
+        <NavBtn to="/contacts" label="Contatos" />
+        <NavBtn to="/kanban" label="Kanban" />
+        <NavBtn to="/calendar" label="Calendário" />
+      </nav>
+
+      {/* Ações à direita */}
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <button
           className="btn soft"
-          onClick={() => navigate(PROFILE_PATH)}
-          title="Minha conta (P)"
+          onClick={onNew}
+          title="Nova conversa"
+          style={{ padding: "6px 10px" }}
+        >
+          + Nova
+        </button>
+        <button
+          className="btn soft"
+          onClick={() => navigate("/profile")}
+          title="Minha conta"
           style={{ padding: "6px 10px" }}
         >
           👤 Minha conta

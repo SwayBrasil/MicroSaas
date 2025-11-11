@@ -4,7 +4,7 @@ import os
 import json
 import jwt
 import asyncio
-from typing import Dict, Set
+from typing import Dict, Set, Optional
 
 from fastapi import (
     FastAPI,
@@ -14,24 +14,27 @@ from fastapi import (
     Query,
     WebSocket,
     WebSocketDisconnect,
+    Header,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from sqlalchemy import func, case, select
+from sqlalchemy import func, case, select, and_
 from sqlalchemy.orm import Session
 
 from pydantic import BaseModel
 
 from .db import get_db, engine, SessionLocal
-from .models import Base, User, Thread, Message
+from .models import Base, User, Thread, Message, Contact, Deal, Obligation
 from .schemas import (
-    LoginRequest,
-    LoginResponse,
-    MessageCreate,
-    MessageRead,
-    ThreadCreate,
-    ThreadRead,
+    # auth/threads/messages
+    LoginRequest, LoginResponse,
+    MessageCreate, MessageRead,
+    ThreadCreate, ThreadRead,
+    # CRM
+    ContactCreate, ContactUpdate, ContactRead,
+    DealCreate, DealUpdate, DealRead,
+    ObligationCreate, ObligationUpdate, ObligationRead,
 )
 from .auth import create_token, verify_password, hash_password, get_current_user
 from .services.llm_service import run_llm
@@ -41,6 +44,7 @@ from .providers import meta as meta_provider
 
 # Realtime via WebSocket
 from .realtime import hub
+
 
 # -----------------------------
 # App & CORS
@@ -139,7 +143,6 @@ async def _broadcast(thread_id: int, payload: dict):
     try:
         await hub.broadcast(str(thread_id), payload)
     except Exception:
-        # Não bloquear fluxo em caso de erro de WS
         pass
 
 
@@ -150,7 +153,6 @@ def _decode_token_fallback(token: str) -> dict:
     return jwt.decode(token, secret, algorithms=algorithms)
 
 try:
-    # se seu auth.py tem decode_token, usamos ele
     from .auth import decode_token as _decode_token
 except Exception:
     _decode_token = _decode_token_fallback  # type: ignore
@@ -168,9 +170,10 @@ def _user_from_query_token(db: Session, token: str) -> User:
         raise HTTPException(401, "invalid user")
     return u
 
-from typing import Optional
-from fastapi import Header
 
+# -----------------------------
+# SSE por thread
+# -----------------------------
 @app.get("/threads/{thread_id}/stream")
 async def stream_thread(
     thread_id: int,
@@ -179,7 +182,7 @@ async def stream_thread(
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
-    # 1) Aceitar Authorization: Bearer <token> como fallback
+    # Authorization: Bearer <token> como fallback
     if not token and authorization:
         if authorization.lower().startswith("bearer "):
             token = authorization.split(" ", 1)[1].strip()
@@ -197,7 +200,6 @@ async def stream_thread(
 
     async def event_gen():
         try:
-            # hello inicial
             yield "event: ping\ndata: ok\n\n"
             while True:
                 if await request.is_disconnected():
@@ -211,13 +213,13 @@ async def stream_thread(
         finally:
             await _unsubscribe(thread_id, q)
 
-    # 2) Cabeçalhos para evitar buffering
     headers = {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
-        "X-Accel-Buffering": "no",  # nginx
+        "X-Accel-Buffering": "no",
     }
     return StreamingResponse(event_gen(), media_type="text/event-stream", headers=headers)
+
 
 # -----------------------------
 # Threads
@@ -227,10 +229,7 @@ def list_threads(user: User = Depends(get_current_user), db: Session = Depends(g
     rows = db.execute(
         select(Thread).where(Thread.user_id == user.id).order_by(Thread.id.desc())
     ).scalars().all()
-    return [
-        ThreadRead(id=t.id, title=t.title, human_takeover=t.human_takeover)
-        for t in rows
-    ]
+    return [ThreadRead(id=t.id, title=t.title, human_takeover=t.human_takeover) for t in rows]
 
 @app.post("/threads", response_model=ThreadRead)
 def create_thread(
@@ -239,9 +238,7 @@ def create_thread(
     db: Session = Depends(get_db),
 ):
     t = Thread(user_id=user.id, title=body.title or "Nova conversa")
-    db.add(t)
-    db.commit()
-    db.refresh(t)
+    db.add(t); db.commit(); db.refresh(t)
     return ThreadRead(id=t.id, title=t.title, human_takeover=t.human_takeover)
 
 @app.delete("/threads/{thread_id}", status_code=204)
@@ -252,8 +249,7 @@ def delete_thread(
     if not t or t.user_id != user.id:
         raise HTTPException(404, "Thread not found")
     db.query(Message).filter(Message.thread_id == thread_id).delete()
-    db.delete(t)
-    db.commit()
+    db.delete(t); db.commit()
     return
 
 
@@ -273,15 +269,9 @@ def get_messages(
         .order_by(Message.id.asc())
         .all()
     )
-
     return [
-    MessageRead(
-        id=m.id,
-        role=m.role,
-        content=m.content,
-        created_at=m.created_at,   # ✅
-    )
-    for m in msgs
+        MessageRead(id=m.id, role=m.role, content=m.content, created_at=m.created_at)
+        for m in msgs
     ]
 
 @app.post("/threads/{thread_id}/messages", response_model=MessageRead)
@@ -295,7 +285,7 @@ async def send_message(
     if not t or t.user_id != user.id:
         raise HTTPException(404, "Thread not found")
 
-    # registra mensagem do usuário
+    # 1) registra e retorna/broadcasta a mensagem do usuário
     m_user = Message(thread_id=thread_id, role="user", content=body.content)
     db.add(m_user); db.commit(); db.refresh(m_user)
 
@@ -303,23 +293,20 @@ async def send_message(
     await _broadcast(thread_id, {
         "type": "message.created",
         "message": {
-            "id": m_assist.id,
-            "role": m_assist.role,
-            "content": m_assist.content,
-            "created_at": m_assist.created_at.isoformat(),  # ✅
+            "id": m_user.id,
+            "role": m_user.role,
+            "content": m_user.content,
+            "created_at": m_user.created_at.isoformat(),
         }
     })
 
-    # takeover ativo → não chama LLM
+    # 2) takeover ativo → não chama LLM
     if getattr(t, "human_takeover", False):
         return MessageRead(
-            id=m_assist.id,
-            role=m_assist.role,
-            content=m_assist.content,
-            created_at=m_assist.created_at,  # ✅
+            id=m_user.id, role=m_user.role, content=m_user.content, created_at=m_user.created_at
         )
 
-    # histórico para a LLM
+    # 3) histórico para a LLM
     hist = [
         {"role": m.role, "content": m.content}
         for m in db.query(Message)
@@ -328,7 +315,7 @@ async def send_message(
         .all()
     ]
 
-    # Sinaliza “digitando” (opcional, útil no front)
+    # 4) “digitando…”
     await _broadcast(thread_id, {"type": "assistant.typing.start"})
 
     reply = await run_llm(
@@ -337,37 +324,205 @@ async def send_message(
         takeover=getattr(t, "human_takeover", False),
     )
 
-    # Parar “digitando”
     await _broadcast(thread_id, {"type": "assistant.typing.stop"})
 
-    if reply:
-        m_assist = Message(thread_id=thread_id, role="assistant", content=reply)
-        db.add(m_assist); db.commit(); db.refresh(m_assist)
+    # 5) salva resposta da IA (se houver)
+    if reply is None:
+        reply = ""
 
-        # 🔵 broadcast da resposta da IA
-        await _broadcast(thread_id, {
-            "type": "message.created",
-            "message": {
-                "id": m_assist.id,
-                "role": m_assist.role,
-                "content": m_assist.content,
-                "created_at": m_assist.created_at.isoformat(),  # ✅
-            }
-        })
+    m_assist = Message(thread_id=thread_id, role="assistant", content=reply)
+    db.add(m_assist); db.commit(); db.refresh(m_assist)
 
-        return MessageRead(
-            id=m_assist.id,
-            role=m_assist.role,
-            content=m_assist.content,
-            created_at=m_assist.created_at,  # ✅
-        )
+    # 🔵 broadcast da resposta da IA
+    await _broadcast(thread_id, {
+        "type": "message.created",
+        "message": {
+            "id": m_assist.id,
+            "role": m_assist.role,
+            "content": m_assist.content,
+            "created_at": m_assist.created_at.isoformat(),
+        }
+    })
 
     return MessageRead(
-        id=m_assist.id,
-        role=m_assist.role,
-        content=m_assist.content,
-        created_at=m_assist.created_at,  # ✅
+        id=m_assist.id, role=m_assist.role, content=m_assist.content, created_at=m_assist.created_at
     )
+
+
+# -----------------------------
+# CRM — Contacts
+# -----------------------------
+@app.get("/contacts", response_model=list[ContactRead])
+def contacts_list(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = (
+        db.query(Contact)
+        .filter(Contact.owner_user_id == user.id)
+        .order_by(Contact.id.desc())
+        .all()
+    )
+    return [ContactRead.model_validate(r, from_attributes=True) for r in rows]
+
+@app.get("/contacts/{contact_id}", response_model=ContactRead)
+def contacts_get(
+    contact_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    c = db.get(Contact, contact_id)
+    if not c or c.owner_user_id != user.id:
+        raise HTTPException(404, "Contact not found")
+    return ContactRead.model_validate(c, from_attributes=True)
+
+@app.post("/contacts", response_model=ContactRead)
+def contacts_create(
+    body: ContactCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    c = Contact(owner_user_id=user.id, **body.model_dump())
+    db.add(c); db.commit(); db.refresh(c)
+    return ContactRead.model_validate(c, from_attributes=True)
+
+@app.patch("/contacts/{contact_id}", response_model=ContactRead)
+def contacts_update(
+    contact_id: int, body: ContactUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    c = db.get(Contact, contact_id)
+    if not c or c.owner_user_id != user.id:
+        raise HTTPException(404, "Contact not found")
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(c, k, v)
+    db.add(c); db.commit(); db.refresh(c)
+    return ContactRead.model_validate(c, from_attributes=True)
+
+@app.delete("/contacts/{contact_id}")
+def contacts_delete(
+    contact_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    c = db.get(Contact, contact_id)
+    if not c or c.owner_user_id != user.id:
+        raise HTTPException(404, "Contact not found")
+    db.delete(c); db.commit()
+    return {"ok": True}
+
+
+# -----------------------------
+# CRM — Deals (Kanban)
+# -----------------------------
+@app.get("/deals", response_model=list[DealRead])
+def deals_list(
+    column: Optional[str] = Query(None),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    q = db.query(Deal).join(Contact, Contact.id == Deal.contact_id).filter(Contact.owner_user_id == user.id)
+    if column:
+        q = q.filter(Deal.column == column)
+    rows = q.order_by(Deal.id.desc()).all()
+    return [DealRead.model_validate(r, from_attributes=True) for r in rows]
+
+@app.post("/deals", response_model=DealRead)
+def deals_create(
+    body: DealCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    # garante que o contato pertence ao usuário
+    c = db.get(Contact, body.contact_id)
+    if not c or c.owner_user_id != user.id:
+        raise HTTPException(400, "invalid contact_id")
+    d = Deal(**body.model_dump())
+    db.add(d); db.commit(); db.refresh(d)
+    return DealRead.model_validate(d, from_attributes=True)
+
+@app.patch("/deals/{deal_id}", response_model=DealRead)
+def deals_update(
+    deal_id: int, body: DealUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    d = db.get(Deal, deal_id)
+    if not d:
+        raise HTTPException(404, "Deal not found")
+    # valida troca de contato (se enviada)
+    payload = body.model_dump(exclude_unset=True)
+    if "contact_id" in payload:
+        c = db.get(Contact, payload["contact_id"])
+        if not c or c.owner_user_id != user.id:
+            raise HTTPException(400, "invalid contact_id")
+    else:
+        # valida o contato atual pertence ao usuário
+        c = db.get(Contact, d.contact_id)
+        if not c or c.owner_user_id != user.id:
+            raise HTTPException(403, "forbidden")
+    for k, v in payload.items():
+        setattr(d, k, v)
+    db.add(d); db.commit(); db.refresh(d)
+    return DealRead.model_validate(d, from_attributes=True)
+
+@app.delete("/deals/{deal_id}")
+def deals_delete(
+    deal_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    d = db.get(Deal, deal_id)
+    if not d:
+        return {"ok": True}
+    c = db.get(Contact, d.contact_id)
+    if not c or c.owner_user_id != user.id:
+        raise HTTPException(403, "forbidden")
+    db.delete(d); db.commit()
+    return {"ok": True}
+
+
+# -----------------------------
+# CRM — Obligations (Calendar)
+# -----------------------------
+@app.get("/obligations", response_model=list[ObligationRead])
+def obligations_list(
+    start: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    end: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    q = db.query(Obligation).filter(Obligation.owner_user_id == user.id)
+    if start:
+        q = q.filter(Obligation.due_date >= f"{start} 00:00:00")
+    if end:
+        q = q.filter(Obligation.due_date <= f"{end} 23:59:59")
+    rows = q.order_by(Obligation.due_date.asc()).all()
+    return [ObligationRead.model_validate(r, from_attributes=True) for r in rows]
+
+@app.post("/obligations", response_model=ObligationRead)
+def obligations_create(
+    body: ObligationCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    # se vier contact_id, valida a posse
+    if body.contact_id:
+        c = db.get(Contact, body.contact_id)
+        if not c or c.owner_user_id != user.id:
+            raise HTTPException(400, "invalid contact_id")
+    o = Obligation(owner_user_id=user.id, **body.model_dump())
+    db.add(o); db.commit(); db.refresh(o)
+    return ObligationRead.model_validate(o, from_attributes=True)
+
+@app.patch("/obligations/{obligation_id}", response_model=ObligationRead)
+def obligations_update(
+    obligation_id: int, body: ObligationUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    o = db.get(Obligation, obligation_id)
+    if not o or o.owner_user_id != user.id:
+        raise HTTPException(404, "Obligation not found")
+    payload = body.model_dump(exclude_unset=True)
+    if "contact_id" in payload and payload["contact_id"]:
+        c = db.get(Contact, payload["contact_id"])
+        if not c or c.owner_user_id != user.id:
+            raise HTTPException(400, "invalid contact_id")
+    for k, v in payload.items():
+        setattr(o, k, v)
+    db.add(o); db.commit(); db.refresh(o)
+    return ObligationRead.model_validate(o, from_attributes=True)
+
+@app.delete("/obligations/{obligation_id}")
+def obligations_delete(
+    obligation_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    o = db.get(Obligation, obligation_id)
+    if not o or o.owner_user_id != user.id:
+        return {"ok": True}
+    db.delete(o); db.commit()
+    return {"ok": True}
 
 
 # -----------------------------
@@ -446,17 +601,17 @@ async def meta_webhook(req: Request, db: Session = Depends(get_db)):
     reply = await run_llm(text, thread_history=hist, takeover=False)
     await _broadcast(t.id, {"type": "assistant.typing.stop"})
 
-    m_assist = Message(thread_id=t.id, role="assistant", content=reply)
+    m_assist = Message(thread_id=t.id, role="assistant", content=reply or "")
     db.add(m_assist); db.commit(); db.refresh(m_assist)
 
     # broadcast da IA
     await _broadcast(t.id, {
         "type": "message.created",
-        "message": {"id": m_assist.id, "role": "assistant", "content": reply}
+        "message": {"id": m_assist.id, "role": "assistant", "content": m_assist.content}
     })
 
     # envia ao cliente via Meta
-    await meta_provider.send_text(from_, reply)
+    await meta_provider.send_text(from_, m_assist.content)
     return {"status": "ok"}
 
 
@@ -519,17 +674,17 @@ async def twilio_webhook(req: Request, db: Session = Depends(get_db)):
     await _broadcast(t.id, {"type": "assistant.typing.stop"})
 
     # salva resposta da IA
-    m_assist = Message(thread_id=t.id, role="assistant", content=reply)
+    m_assist = Message(thread_id=t.id, role="assistant", content=reply or "")
     db.add(m_assist); db.commit(); db.refresh(m_assist)
 
     # broadcast da IA
     await _broadcast(t.id, {
         "type": "message.created",
-        "message": {"id": m_assist.id, "role": "assistant", "content": reply}
+        "message": {"id": m_assist.id, "role": "assistant", "content": m_assist.content}
     })
 
     # envia ao cliente via Twilio (SDK síncrono → roda em thread para não travar)
-    await asyncio.to_thread(twilio_provider.send_text, from_, reply, "BOT")
+    await asyncio.to_thread(twilio_provider.send_text, from_, m_assist.content, "BOT")
     return {"status": "ok"}
 
 
@@ -563,17 +718,15 @@ def stats(user: User = Depends(get_current_user), db: Session = Depends(get_db))
         .order_by(Message.id.desc())
         .first()
     )
-    last_activity = None
-    if last_msg is not None:
-        last_activity = getattr(last_msg, "created_at", None)
-        if last_activity is None:
-            last_activity = "—"
+    last_activity = getattr(last_msg, "created_at", None) if last_msg else None
+    if last_activity is None:
+        last_activity = "—"
 
     return {
-        "threads": threads_count,
-        "user_messages": user_msgs,
-        "assistant_messages": assistant_msgs,
-        "total_messages": total_msgs,
+        "threads": max(0, threads_count),
+        "user_messages": max(0, user_msgs),
+        "assistant_messages": max(0, assistant_msgs),
+        "total_messages": max(0, total_msgs),
         "last_activity": last_activity,
     }
 
@@ -583,11 +736,9 @@ def stats(user: User = Depends(get_current_user), db: Session = Depends(get_db))
 # -----------------------------
 @app.websocket("/ws/threads/{thread_id}")
 async def ws_thread(websocket: WebSocket, thread_id: str):
-    # Se tiver auth por token, valide aqui antes de accept()
     await hub.connect(thread_id, websocket)
     try:
         while True:
-            # Se quiser receber “client typing” etc, leia mensagens do ws:
             await websocket.receive_text()
     except WebSocketDisconnect:
         await hub.disconnect(thread_id, websocket)
