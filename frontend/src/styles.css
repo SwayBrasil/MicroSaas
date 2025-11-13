@@ -22,15 +22,64 @@
     --success: #16a34a;
     --danger: #b91c1c;
   
+    /* Sombras */
     --shadow-sm: 0 2px 8px rgba(0,0,0,0.06);
     --shadow-md: 0 8px 32px rgba(37, 99, 235, 0.10);
+  
+  /* Soft tokens extras (usados no header/nav) */
+  --primary-soft: rgba(37,99,235,.10);
+  --danger-soft: rgba(185,28,28,.10);
+  --danger-border: #fecaca;
+  
+  /* Cores das bolhas de mensagem */
+  --bubble-user-bg: #eff6ff;
+  --bubble-user-border: #bfdbfe;
+  --bubble-role-color: #374151;
+  }
+  
+  /* ===========================
+     Modo Escuro
+     =========================== */
+  :root.dark {
+    /* Paleta escura */
+    --primary-color: #3b82f6;   /* azul mais claro para contraste */
+    --secondary-color: #2563eb;
+    --text-color: #f9fafb;      /* cinza-50 */
+    --light-bg: #1f2937;        /* cinza-800 */
+    --white: #111827;           /* cinza-900 */
+  
+    --bg: #0f172a;              /* slate-900 */
+    --panel: #1e293b;           /* slate-800 */
+    --text: #f1f5f9;            /* slate-100 */
+    --muted: #94a3b8;           /* slate-400 */
+    --border: #334155;          /* slate-700 */
+  
+    --success: #22c55e;
+    --danger: #ef4444;
+  
+    /* Sombras mais sutis no modo escuro */
+    --shadow-sm: 0 2px 8px rgba(0,0,0,0.3);
+    --shadow-md: 0 8px 32px rgba(0, 0, 0, 0.4);
+  
+    --primary-soft: rgba(59,130,246,.15);
+    --danger-soft: rgba(239,68,68,.15);
+    --danger-border: #7f1d1d;
+    
+    /* Cores das bolhas de mensagem no modo escuro */
+    --bubble-user-bg: #1e3a5f;
+    --bubble-user-border: #3b82f6;
+    --bubble-role-color: #cbd5e1;
   }
   
   /* ===========================
      Base
      =========================== */
   * { box-sizing: border-box; }
-  html, body, #root { height: 100%; }
+  html, body, #root {
+    height: 100%;
+    overflow: hidden; /* todo scroll fica em containers com overflow:auto */
+  }  
+  
   
   body {
     margin: 0;
@@ -67,7 +116,15 @@
   .input:focus {
     border-color: var(--primary-color);
     box-shadow: 0 0 0 3px rgba(37, 99, 235, .15);
-    background: #fff;
+    background: var(--bg);
+  }
+  .input:-webkit-autofill,
+  .input:-webkit-autofill:hover,
+  .input:-webkit-autofill:focus {
+    -webkit-text-fill-color: var(--text);
+    -webkit-box-shadow: 0 0 0px 1000px var(--bg) inset;
+    box-shadow: 0 0 0px 1000px var(--bg) inset;
+    background: var(--bg) !important;
   }
   
   .btn {
@@ -80,6 +137,7 @@
     cursor: pointer;
     transition: background .15s ease, box-shadow .15s ease, transform .05s ease;
     box-shadow: var(--shadow-sm);
+    text-decoration: none; /* caso seja <a class="btn"> */
   }
   .btn:hover { background: #1d4ed8; }
   .btn:active { transform: translateY(1px); }
@@ -129,6 +187,21 @@
     box-shadow: 0 0 0 2px rgba(37, 99, 235, .12) inset;
   }
   
+  /* Estilo específico para cards da sidebar do chat (WhatsApp-like) */
+  aside[aria-label="Lista de conversas"] .item {
+    border: none;
+    border-radius: 0;
+    transition: background .15s ease;
+  }
+  aside[aria-label="Lista de conversas"] .item:hover {
+    background: var(--panel) !important;
+    border: none;
+  }
+  aside[aria-label="Lista de conversas"] .item.active {
+    background: var(--bg) !important;
+    border-left: 3px solid var(--primary-color);
+  }
+  
   /* ===========================
      Bubbles do Chat
      =========================== */
@@ -148,14 +221,14 @@
     font-size: 12px;
     color: var(--muted);
   }
-  .bubble .meta .role { font-weight: 700; color: #374151; }
-  .bubble .content { white-space: pre-wrap; line-height: 1.5; font-size: 14px; }
+  .bubble .meta .role { font-weight: 700; color: var(--bubble-role-color); }
+  .bubble .content { white-space: pre-wrap; line-height: 1.5; font-size: 14px; color: var(--text); }
   
   /* Usuário (lado direito) */
   .bubble.user {
     margin-left: auto;
-    background: #eff6ff; /* azul bem claro */
-    border-color: #bfdbfe;
+    background: var(--bubble-user-bg);
+    border-color: var(--bubble-user-border);
   }
   
   /* Assistente (lado esquerdo) */
@@ -364,78 +437,145 @@
   }
   
   /* ===== Profile ===== */
-.profile-wrap {
-  max-width: 820px;
-  margin: 24px auto;
-  padding: 0 16px;
-}
-.profile-card {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 18px;
-  box-shadow: var(--shadow-sm);
-}
-.profile-title {
-  font-size: 1.25rem;
-  font-weight: 800;
-  margin: 0 0 12px 0;
-  color: #111827;
-}
-.form-grid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: 1fr;
-}
-.form-row {
-  display: grid;
-  gap: 8px;
-}
-.label {
-  font-size: 12px;
-  color: var(--muted);
-}
-.readonly {
-  background: #f9fafb;
-}
-.actions {
-  display: flex;
-  gap: 10px;
-  justify-content: flex-end;
-  margin-top: 8px;
-}
-
-/* ===== Dashboard ===== */
-.stats-wrap {
-  max-width: 1100px;
-  margin: 24px auto;
-  padding: 0 16px;
-}
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 14px;
-}
-.stat-cardx {
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: #ffffff;
-  box-shadow: var(--shadow-sm);
-  padding: 16px;
-}
-.stat-kpi {
-  font-size: 2rem;
-  font-weight: 800;
-  color: #111827;
-  line-height: 1;
-}
-.stat-label {
-  margin-top: 6px;
-  font-size: 13px;
-  color: var(--muted);
-}
-.stat-legend {
-  margin-top: 8px;
-  font-size: 12px;
-  color: #4b5563;
-}
+  .profile-wrap {
+    max-width: 820px;
+    margin: 24px auto;
+    padding: 0 16px;
+  }
+  .profile-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px;
+    box-shadow: var(--shadow-sm);
+  }
+  .profile-title {
+    font-size: 1.25rem;
+    font-weight: 800;
+    margin: 0 0 12px 0;
+    color: #111827;
+  }
+  .form-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: 1fr;
+  }
+  .form-row {
+    display: grid;
+    gap: 8px;
+  }
+  .label {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .readonly {
+    background: #f9fafb;
+  }
+  .actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    margin-top: 8px;
+  }
+  
+  /* ===== Dashboard ===== */
+  .stats-wrap {
+    max-width: 1100px;
+    margin: 24px auto;
+    padding: 0 16px;
+  }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+  }
+  .stat-cardx {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: #ffffff;
+    box-shadow: var(--shadow-sm);
+    padding: 16px;
+  }
+  .stat-kpi {
+    font-size: 2rem;
+    font-weight: 800;
+    color: #111827;
+    line-height: 1;
+  }
+  .stat-label {
+    margin-top: 6px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .stat-legend {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #4b5563;
+  }
+  
+  .btn.soft.active {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, .10);
+    background: #fff;
+  }
+  
+  /* clamp helpers para manter a altura igual sem quebrar layout */
+  .one-line {
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .two-lines {
+    display: -webkit-box;
+    -webkit-line-clamp: 2; /* mostre no máx. 2 linhas */
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  
+  /* (opcional) se quiser padronizar por CSS em vez do inline */
+  .task-item {
+    min-height: 96px; /* mantenha em sincronia com TASK_ITEM_MIN_H se usar ambos */
+  }
+  
+  /* ===== Nav compacto (sem linhas/borda, sem sublinhado) =====
+     Aplique class="top-nav" no <nav> do header. */
+  .top-nav a { text-decoration: none; } /* remove sublinhado só no nav */
+  
+  .top-nav .btn {
+    /* override do botão padrão só no nav */
+    padding: 4px 10px;                 /* menor */
+    font-size: 13px;
+    line-height: 1.1;
+    border-radius: 999px;              /* pill */
+    border: none !important;           /* ❌ sem linhas (sem borda) */
+    box-shadow: none !important;       /* sem sombra */
+    background: transparent;           /* neutro */
+    color: var(--text);
+    transition: background .15s ease, color .15s ease, transform .05s ease;
+  }
+  .top-nav .btn.soft {                 /* mantém a classe, mas sem borda */
+    background: transparent;
+    color: var(--text);
+  }
+  .top-nav .btn:hover {
+    background: var(--panel);          /* hover suave */
+    color: var(--primary-color);
+  }
+  .top-nav .btn:active { transform: translateY(1px); }
+  .top-nav .btn.active {
+    background: var(--primary-soft);
+    color: var(--primary-color);
+  }
+  
+  /* Botão de sair “danger-soft” (se usar .btn dentro do nav) */
+  .top-nav .btn.logout {
+    background: var(--danger-soft);
+    color: var(--danger);
+    border: none !important;
+  }
+  .top-nav .btn.logout:hover {
+    filter: brightness(0.98);
+  }
+  

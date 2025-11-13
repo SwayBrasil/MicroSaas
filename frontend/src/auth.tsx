@@ -35,9 +35,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         } else {
           setUser(null);
         }
-      } catch {
-        localStorage.removeItem("token");
-        setUser(null);
+      } catch (error: any) {
+        // Se for 401, o token é inválido - remove e redireciona
+        if (error?.message?.includes("401") || error?.message?.includes("Unauthorized")) {
+          localStorage.removeItem("token");
+          setUser(null);
+          // Não navega aqui para evitar loops - o ProtectedRoute vai redirecionar
+        } else {
+          // Para outros erros (rede, etc), mantém o token mas não seta o user
+          console.warn("Erro ao verificar autenticação:", error);
+          setUser(null);
+        }
       } finally {
         setLoading(false);
       }

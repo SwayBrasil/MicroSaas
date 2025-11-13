@@ -30,7 +30,7 @@ def human_reply(thread_id: int, body: HumanReplyBody,
     if not t or t.user_id != user.id:
         raise HTTPException(404, "Thread not found")
 
-    # 1) salva no histórico
+    # 1) salva no histórico (marcado como mensagem humana)
     msg = Message(thread_id=t.id, role="assistant", content=body.content, is_human=True)
     db.add(msg); db.commit(); db.refresh(msg)
 
