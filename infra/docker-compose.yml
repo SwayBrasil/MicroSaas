@@ -41,6 +41,7 @@ services:
     # monta código para hot-reload do uvicorn
     volumes:
       - ../api/app:/app/app
+      - ../api/arejano_wc_data.json:/app/arejano_wc_data.json
     command: ["sh", "-c", "./start.sh --reload"]
     healthcheck:
       test:

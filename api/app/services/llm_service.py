@@ -2,10 +2,22 @@
 import os
 import asyncio
 import math
+import json
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 
 from openai import OpenAI
+
+# Importa funções de consulta ao WooCommerce
+from .wc_data import (
+    lookup_product,
+    search_products,
+    get_product_price,
+    get_product_attributes,
+    get_product_variations,
+    get_product_description,
+    build_product_link,
+)
 
 # -----------------------------
 # Config
@@ -79,27 +91,233 @@ def _coerce_history(thread_history: Optional[List[Dict[str, str]]],
     return norm
 
 
-async def _call_openai_with_retries(messages: List[Dict[str, str]]) -> str:
+# Definições das funções disponíveis para a IA
+FUNCTIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_product",
+            "description": "Busca um produto específico por nome ou slug. Use quando o cliente mencionar um produto específico.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Nome ou slug do produto (ex: 'Raspadinhas Promocionais' ou 'raspadinhas-promocionais')"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_products",
+            "description": "Busca múltiplos produtos por termo. Use quando o cliente mencionar um tipo de produto sem especificar exatamente qual.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Termo de busca (ex: 'cartão de visita', 'adesivo', 'banner')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Número máximo de resultados (padrão: 10)",
+                        "default": 10
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_product_price",
+            "description": "Obtém o preço de um produto, considerando variações se for produto variável. Use quando o cliente perguntar sobre preço.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product_slug": {
+                        "type": "string",
+                        "description": "Slug do produto (ex: 'raspadinhas-promocionais')"
+                    },
+                    "attributes": {
+                        "type": "object",
+                        "description": "Atributos do produto (ex: {'pa_tamanho': '90x50mm', 'pa_quantidade': '1000'})",
+                        "additionalProperties": {"type": "string"}
+                    }
+                },
+                "required": ["product_slug"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_product_attributes",
+            "description": "Obtém os atributos disponíveis para um produto (tamanho, material, quantidade, etc.). Use para verificar quais opções existem.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product_slug": {
+                        "type": "string",
+                        "description": "Slug do produto"
+                    }
+                },
+                "required": ["product_slug"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_product_description",
+            "description": "Obtém a descrição completa de um produto. Use quando precisar de mais detalhes sobre o produto.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product_slug": {
+                        "type": "string",
+                        "description": "Slug do produto"
+                    }
+                },
+                "required": ["product_slug"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "build_product_link",
+            "description": "Constrói o link completo para um produto com atributos pré-selecionados. Use quando for enviar o link ao cliente.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product_slug": {
+                        "type": "string",
+                        "description": "Slug do produto"
+                    },
+                    "attributes": {
+                        "type": "object",
+                        "description": "Atributos para incluir no link (ex: {'pa_tamanho': '90x50mm', 'pa_quantidade': '1000'})",
+                        "additionalProperties": {"type": "string"}
+                    }
+                },
+                "required": ["product_slug"]
+            }
+        }
+    }
+]
+
+
+def _execute_function(function_name: str, arguments: Dict[str, Any]) -> Any:
+    """Executa uma função chamada pela IA"""
+    try:
+        if function_name == "lookup_product":
+            return lookup_product(arguments.get("query", ""))
+        elif function_name == "search_products":
+            return search_products(arguments.get("query", ""), arguments.get("limit", 10))
+        elif function_name == "get_product_price":
+            return get_product_price(
+                arguments.get("product_slug", ""),
+                arguments.get("attributes")
+            )
+        elif function_name == "get_product_attributes":
+            return get_product_attributes(arguments.get("product_slug", ""))
+        elif function_name == "get_product_description":
+            return get_product_description(arguments.get("product_slug", ""))
+        elif function_name == "build_product_link":
+            return build_product_link(
+                arguments.get("product_slug", ""),
+                arguments.get("attributes")
+            )
+        else:
+            return {"error": f"Função desconhecida: {function_name}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def _call_openai_with_retries(messages: List[Dict[str, Any]], use_functions: bool = True) -> str:
     """
-    Chamada ao OpenAI com retries e backoff exponencial.
+    Chamada ao OpenAI com retries, backoff exponencial e function calling.
     Executa a chamada síncrona em thread separada para não bloquear o loop.
     """
-    last_err: Optional[BaseException] = None
+    max_function_iterations = 5  # Limite de iterações de function calling
+    function_iterations = 0
+    attempt = 0
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    while True:
+        attempt += 1
+        last_err: Optional[BaseException] = None
+        
         try:
             def _sync_call() -> Any:
-                # Em SDKs recentes, o timeout pode ser passado por request
-                # Se sua versão não aceitar 'timeout', remova o argumento.
-                return client.chat.completions.create(
-                    model=MODEL,
-                    messages=messages,
-                    timeout=REQUEST_TIMEOUT,
-                )
+                kwargs = {
+                    "model": MODEL,
+                    "messages": messages,
+                    "timeout": REQUEST_TIMEOUT,
+                }
+                
+                if use_functions and function_iterations < max_function_iterations:
+                    kwargs["tools"] = FUNCTIONS
+                    kwargs["tool_choice"] = "auto"
+                
+                return client.chat.completions.create(**kwargs)
 
             resp = await asyncio.to_thread(_sync_call)
-            content = (resp.choices[0].message.content or "").strip()
+            message = resp.choices[0].message
+            
+            # Verifica se há function calls
+            if message.tool_calls and function_iterations < max_function_iterations:
+                function_iterations += 1
+                attempt = 0  # Reseta contador de retries para nova chamada
+                
+                # Adiciona a mensagem do assistente com tool calls
+                messages.append({
+                    "role": "assistant",
+                    "content": message.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": tc.type,
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
+                        }
+                        for tc in message.tool_calls
+                    ]
+                })
+                
+                # Executa as funções
+                for tool_call in message.tool_calls:
+                    function_name = tool_call.function.name
+                    try:
+                        arguments = json.loads(tool_call.function.arguments)
+                    except:
+                        arguments = {}
+                    
+                    result = _execute_function(function_name, arguments)
+                    
+                    # Adiciona resultado como tool message
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(result, ensure_ascii=False)
+                    })
+                
+                # Chama novamente com os resultados
+                continue
+            
+            # Sem function calls ou limite atingido, retorna resposta final
+            content = (message.content or "").strip()
+            if not content and message.tool_calls:
+                content = "Desculpe, não consegui obter as informações solicitadas. Pode reformular sua pergunta?"
             return content
+            
         except Exception as e:
             last_err = e
             if attempt >= MAX_RETRIES:
@@ -143,6 +361,6 @@ async def run_llm(
     user_msg = (message or "").strip()
     messages.append({"role": "user", "content": user_msg})
 
-    # Chamar OpenAI com robustez (timeout + retries)
-    content = await _call_openai_with_retries(messages)
+    # Chamar OpenAI com robustez (timeout + retries + function calling)
+    content = await _call_openai_with_retries(messages, use_functions=True)
     return content

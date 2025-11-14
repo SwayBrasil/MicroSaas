@@ -30,11 +30,15 @@ def create_token(user_id: int) -> str:
 
 auth_scheme = HTTPBearer()
 
+def decode_token(token: str) -> dict:
+    """Decode JWT token - can be imported by main.py"""
+    return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+
 def get_current_user(creds: HTTPAuthorizationCredentials = Depends(auth_scheme),
                      db: Session = Depends(get_db)) -> User:
     token = creds.credentials
     try:
-        data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        data = decode_token(token)
         uid = data.get("sub")
     except Exception:
         raise HTTPException(401, "Invalid token")

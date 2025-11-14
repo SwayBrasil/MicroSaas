@@ -1,101 +1,128 @@
-# api/app/models.py
+# app/models.py
 from __future__ import annotations
 
-from datetime import datetime
-from typing import List, Optional
+from sqlalchemy import (
+    Column, Integer, String, Boolean, DateTime, ForeignKey, Text, func
+)
+from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.types import JSON
 
-from sqlalchemy import String, Boolean, ForeignKey, Text, DateTime, func, Integer
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-
-
-# -----------------------------
-# Base declarativa (SQLAlchemy 2.x)
-# -----------------------------
-class Base(DeclarativeBase):
-    pass
+Base = declarative_base()
 
 
-# -----------------------------
-# Tabelas
-# -----------------------------
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    password_hash: Mapped[str] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    id = Column(Integer, primary_key=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
 
-    # RELACIONAMENTOS
-    threads: Mapped[List["Thread"]] = relationship(
-        back_populates="user",
-        cascade="all, delete-orphan",
-    )
-
-    def __repr__(self) -> str:
-        return f"<User id={self.id} email={self.email!r}>"
+    threads = relationship("Thread", back_populates="user", cascade="all, delete-orphan")
 
 
 class Thread(Base):
     __tablename__ = "threads"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    # Se você usa um ID externo (ex.: ID de conversa no provedor)
-    external_thread_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    id = Column(Integer, primary_key=True)
+    external_thread_id = Column(String(255), nullable=True)
+    title = Column(String(255), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    created_at = Column(DateTime, server_default=func.now())
 
-    title: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    human_takeover = Column(Boolean, default=False, nullable=False)
+    external_user_phone = Column(String(64), nullable=True)
 
-    # Dono da thread (seu usuário interno do painel)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    origin = Column(String(64), nullable=True)
+    lead_level = Column(String(32), nullable=True)
+    lead_score = Column(Integer, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    # ⚠️ Coluna real no banco: "meta"
+    meta = Column(JSON, name="meta", nullable=True)
 
-    # 🔒 takeover: quando True, IA não responde
-    human_takeover: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-
-    # (Opcional) telefone/wa_id do cliente para envio via WhatsApp
-    external_user_phone: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-
-    # RELACIONAMENTOS
-    user: Mapped["User"] = relationship(back_populates="threads")
-    messages: Mapped[List["Message"]] = relationship(
-        back_populates="thread",
-        cascade="all, delete-orphan",
-        order_by="Message.id.asc()",
-    )
-
-    def __repr__(self) -> str:
-        return f"<Thread id={self.id} title={self.title!r} takeover={self.human_takeover}>"
+    user = relationship("User", back_populates="threads")
+    messages = relationship("Message", back_populates="thread", cascade="all, delete-orphan")
 
 
 class Message(Base):
     __tablename__ = "messages"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id = Column(Integer, primary_key=True)
+    thread_id = Column(Integer, ForeignKey("threads.id"), nullable=False, index=True)
+    role = Column(String(16), nullable=False)  # "user" | "assistant" | "system"
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    is_human = Column(Boolean, default=False, nullable=False)  # Para mensagens enviadas por humanos
 
-    thread_id: Mapped[int] = mapped_column(ForeignKey("threads.id"), index=True)
+    thread = relationship("Thread", back_populates="messages")
 
-    # "user" | "assistant" | (opcional) "system"
-    role: Mapped[str] = mapped_column(String(32))
 
-    content: Mapped[str] = mapped_column(Text)
+# ================== CRM Models ==================
+class Contact(Base):
+    """Contato/CRM vinculado a uma thread"""
+    __tablename__ = "contacts"
 
-    # Se você integra com um provedor e quer guardar o ID externo
-    external_message_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    id = Column(Integer, primary_key=True)
+    thread_id = Column(Integer, ForeignKey("threads.id"), nullable=False, unique=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    
+    # Dados básicos
+    name = Column(String(255), nullable=True)
+    email = Column(String(255), nullable=True, index=True)
+    phone = Column(String(64), nullable=True, index=True)
+    company = Column(String(255), nullable=True)
+    
+    # Métricas calculadas (cache)
+    total_orders = Column(Integer, default=0, nullable=False)
+    total_spent = Column(Integer, default=0, nullable=False)  # em centavos
+    average_ticket = Column(Integer, nullable=True)  # em centavos
+    most_bought_products = Column(JSON, nullable=True)  # [{"product": "Cartão", "count": 5}]
+    
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    last_interaction_at = Column(DateTime, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    thread = relationship("Thread", backref="contact")
+    tags = relationship("ContactTag", back_populates="contact", cascade="all, delete-orphan")
+    notes = relationship("ContactNote", back_populates="contact", cascade="all, delete-orphan", order_by="ContactNote.created_at.desc()")
+    reminders = relationship("ContactReminder", back_populates="contact", cascade="all, delete-orphan")
 
-    # Marcador para respostas enviadas por atendente humano
-    is_human: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    # RELACIONAMENTOS
-    thread: Mapped["Thread"] = relationship(back_populates="messages")
+class ContactTag(Base):
+    """Tags personalizadas para contatos"""
+    __tablename__ = "contact_tags"
 
-    def __repr__(self) -> str:
-        return f"<Message id={self.id} role={self.role} human={self.is_human}>"
+    id = Column(Integer, primary_key=True)
+    contact_id = Column(Integer, ForeignKey("contacts.id"), nullable=False, index=True)
+    tag = Column(String(64), nullable=False, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    contact = relationship("Contact", back_populates="tags")
+
+
+class ContactNote(Base):
+    """Notas internas sobre contatos"""
+    __tablename__ = "contact_notes"
+
+    id = Column(Integer, primary_key=True)
+    contact_id = Column(Integer, ForeignKey("contacts.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    contact = relationship("Contact", back_populates="notes")
+
+
+class ContactReminder(Base):
+    """Lembretes de follow-up"""
+    __tablename__ = "contact_reminders"
+
+    id = Column(Integer, primary_key=True)
+    contact_id = Column(Integer, ForeignKey("contacts.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    message = Column(Text, nullable=False)
+    due_date = Column(DateTime, nullable=False, index=True)
+    completed = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    contact = relationship("Contact", back_populates="reminders")

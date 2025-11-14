@@ -10,6 +10,8 @@ __pycache__/
 *.pyo
 *.log
 .venv/
+venv/
+api/venv/
 api/.mypy_cache/
 api/.pytest_cache/
 
@@ -34,3 +36,14 @@ infra/.env.*.local
 # Ngrok
 .ngrok2/
 .ngrok/
+
+# Arquivos grandes / dados coletados
+# api/arejano_wc_data.json  # Descomente se não quiser versionar (3.3M)
+
+# Documentação / Análises temporárias
+ANALISE_FRONTEND.md
+MELHORIAS_SUGERIDAS.md
+RESUMO_EXECUTIVO.md
+TESTE_CRM.md
+api/README_WC_COLLECT.md
+api/TESTE_API_WC.md
